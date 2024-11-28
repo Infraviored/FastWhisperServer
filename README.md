@@ -1,108 +1,123 @@
-# Whisper Cube
+# FastWhisperServer
 
-A client-server application for real-time audio transcription using OpenAI's Whisper model.
+## Introduction
+
+FastWhisperServer enables instant voice-to-text transcription using OpenAI's Whisper model. It's designed for developers who want GPU-accelerated transcription without requiring a GPU on their local machine.
+
+### Key Benefits
+
+- **Instant Voice-to-Clipboard**: Record with keyboard shortcuts, get text in your clipboard
+- **Remote GPU Processing**: Use a powerful server while running lightweight clients (tested: GTX 1050, ~2s for 30s audio)
+- **Secure Communication**: All traffic tunneled through SSH
+- **Perfect for AI Development**: Quickly dictate prompts to your AI assistants
+
+### How It Works
+
+1. **Server Side**: 
+   - GPU machine runs the Whisper transcription server
+   - Uses faster-whisper for quick processing
+
+2. **Client Side**:
+   - Records audio with sound notifications
+   - Automatically copies transcription to clipboard
+   - Uses SSH tunnel for security
+
+### Typical Workflow
+
+1. Press shortcut (e.g., `Ctrl+Alt+R`) → start sound plays
+2. Speak your text
+3. Press stop shortcut (`Ctrl+Alt+S`) → stop sound plays
+4. Wait for completion sound (~2 seconds)
+5. Press `Ctrl+V` to paste anywhere
 
 ## Prerequisites
 
+Server:
 - Python 3.8+
-- `screen` (for server management)
-- CUDA-capable GPU (recommended)
+- CUDA-capable GPU
+- faster-whisper
+- CUDA toolkit
+
+Client:
+- Python 3.8+
+- `xclip`
+- `python3-pyaudio`
+- `ssh`
 
 ## Installation
 
-### Server Setup
+### 1. Client Setup
 
-1. Clone the repository on the server:
+1. Clone and prepare:
 ```bash
-git clone https://github.com/yourusername/whisper_cube.git
-cd whisper_cube
+git clone git@github.com:Infraviored/FastWhisperServer.git
+cd FastWhisperServer
+python3 -m venv whisper_env
+source whisper_env/bin/activate
 ```
 
-2. Create and activate virtual environment:
+2. Install dependencies:
 ```bash
-python -m venv whisper_env
-source whisper_env/bin/activate  # On Linux/Mac
-# or
-.\whisper_env\Scripts\activate  # On Windows
+sudo apt-get install xclip python3-pyaudio
+pip3 install -r requirements.txt
 ```
 
-3. Install dependencies:
+3. Configure:
 ```bash
-pip install -r requirements.txt
+cp config/config.template.py config/config.py
+cp config/config.template.sh config/config.sh
 ```
 
-4. Create server configuration:
+Edit both files with your settings (server address, API key, etc.)
+
+### 2. Server Setup
+
+1. Clone and prepare:
 ```bash
-cp config/server_config.template.sh config/server_config.sh
-nano config/server_config.sh
+git clone git@github.com:Infraviored/FastWhisperServer.git
+cd FastWhisperServer
+python3 -m venv whisper_env
+source whisper_env/bin/activate
+pip3 install -r requirements.txt
 ```
 
-Required server configurations:
-- `PORT`: Port number for the server (default: 2024)
-- `MODEL_SIZE`: Whisper model size (tiny, base, small, medium, large)
-- `COMPUTE_TYPE`: CPU/GPU computation type (float16, float32)
-
-### Client Setup
-
-1. Clone the repository on the client machine:
+2. Transfer configuration:
 ```bash
-git clone https://github.com/yourusername/whisper_cube.git
-cd whisper_cube
+./client_side/shell/transfer_config.sh
 ```
 
-2. Create client configuration:
-```bash
-cp config/client_config.template.sh config/client_config.sh
-nano config/client_config.sh
-```
+### 3. Setup Shortcuts
 
-Required client configurations:
-- `SERVER_IP`: IP address of the server
-- `SERVER_PORT`: Port number matching server configuration
-- `NOTIFICATION_SOUND`: Path to sound file for notifications (optional)
+Add keyboard shortcuts in your system settings:
+```
+Start Recording: python3 /path/to/FastWhisperServer/client_side/audio_client.py --start
+Stop Recording: python3 /path/to/FastWhisperServer/client_side/audio_client.py --stop
+```
 
 ## Usage
 
-### Server-side Commands
+### Server
 
-Start the server:
 ```bash
 ./server_scripts/start_server.sh
-```
-
-Stop the server:
-```bash
 ./server_scripts/stop_server.sh
 ```
 
-### Client-side Commands
+### Client
 
-Start transcription:
 ```bash
-./client_scripts/whisper_start.sh
-```
+# Test setup
+python3 client_side/audio_client.py --test-sounds
 
-Stop transcription:
-```bash
-./client_scripts/whisper_stop.sh
-```
-
-View server output:
-```bash
-./client_scripts/whisper_reattach.sh
+# Or use keyboard shortcuts configured above
 ```
 
 ## Troubleshooting
 
-- If the server won't start, check if the port is already in use:
-  ```bash
-  lsof -i :2024  # Replace with your port number
-  ```
-
-- Ensure the virtual environment is activated before running scripts
-- Check server logs for CUDA/GPU-related errors if using GPU acceleration
+- **No Connection**: Check SSH tunnel
+- **Audio Issues**: Test with `arecord -l`
+- **Already Running**: Delete `/tmp/whisper_recorder.pid`
 
 ## License
 
 [Your license information here]
-
