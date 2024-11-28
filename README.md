@@ -117,7 +117,3 @@ python3 client_side/audio_client.py --test-sounds
 - **No Connection**: Check SSH tunnel
 - **Audio Issues**: Test with `arecord -l`
 - **Already Running**: Delete `/tmp/whisper_recorder.pid`
-
-## License
-
-[Your license information here]
