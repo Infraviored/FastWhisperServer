@@ -2,7 +2,7 @@
 
 # Load configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../../../config/config.sh"
+source "$SCRIPT_DIR/../../config/config.sh"
 
 # Check if server is running
 if ! ssh -p $SSH_PORT $SSH_USER@$SSH_HOST "pgrep -f 'python3.*audio_server.py'" > /dev/null; then
