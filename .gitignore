@@ -1,3 +1,17 @@
+# Virtual Environment
+whisper_env/
+
+# Configuration
+config/config.py
+config/config.sh
+
+# Logs
+*.log
+
+# Temporary files
+temp_*.wav
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
