@@ -29,15 +29,16 @@ atexit.register(cleanup)
 cli = sys.modules["flask.cli"]
 cli.show_server_banner = lambda *x: None
 
-# Disable all logging except errors
+# Disable all logging
 log = logging.getLogger("werkzeug")
 log.setLevel(logging.ERROR)
+logging.getLogger("faster_whisper").setLevel(logging.ERROR)
 
 
 @app.route("/transcribe", methods=["POST"])
 def transcribe():
     start_time = time.time()
-    print(f"\nStarting new transcription at {time.strftime('%H:%M:%S')}")
+    print(f"\nStarting transcription at {time.strftime('%H:%M:%S')}")
 
     # Check API key
     if request.headers.get("X-API-Key") != CONFIG["API_KEY"]:
@@ -59,39 +60,23 @@ def transcribe():
             if wav.getnchannels() > 2:
                 return "Invalid audio format", 400
 
-        print("Starting model.transcribe...")
-        print(
-            f"Model config: device={CONFIG['DEVICE']}, compute_type={CONFIG['COMPUTE_TYPE']}"
-        )
-
-        # Enable debug logging for the model
-        logging.basicConfig()
-        logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
-
         segments, info = model.transcribe(
             temp_path, beam_size=CONFIG["BEAM_SIZE"], without_timestamps=True
         )
 
         print(
-            f"Transcription complete. Language: {info.language} (probability: {info.language_probability})"
+            f"Detected language: {info.language} (probability: {info.language_probability:.2f})"
         )
 
         # Force evaluation of generator to catch any issues
-        segments = list(segments)
-        print(f"Number of segments: {len(segments)}")
-
-        text = " ".join(seg.text for seg in segments)
+        text = " ".join(segment.text for segment in segments)
         duration = time.time() - start_time
-        print(f"Completed transcription in {duration:.1f} seconds")
+        print(f"Completed transcription in {duration:.1f} seconds\n")
 
         return text.strip()
 
     except Exception as e:
         print(f"Error during transcription: {str(e)}")
-        print(f"Error type: {type(e)}")
-        import traceback
-
-        print(traceback.format_exc())
         return str(e), 500
     finally:
         if os.path.exists(temp_path):

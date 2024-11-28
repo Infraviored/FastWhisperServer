@@ -18,15 +18,17 @@ check_local_tunnel() {
 
 # Main logic
 if check_remote_server; then
-    echo "Whisper server is already running."
+    echo "Whisper server is already running. Reattaching..."
     
+    # Ensure tunnel exists
     if ! check_local_tunnel; then
         echo "Creating SSH tunnel..."
         ssh -f -N -L $SERVER_PORT:127.0.0.1:$SERVER_PORT -p $SSH_PORT $SSH_USER@$SSH_HOST
         echo "SSH tunnel created."
-    else
-        echo "SSH tunnel already exists."
     fi
+    
+    # Reattach to the screen session
+    ssh -t -p $SSH_PORT $SSH_USER@$SSH_HOST "screen -r $SCREEN_SESSION_NAME"
 else
     echo "Starting Whisper server..."
     # Create tunnel if it doesn't exist
