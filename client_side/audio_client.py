@@ -16,7 +16,7 @@ import numpy as np
 import sounddevice as sd
 import time
 import signal
-import websocket
+from websocket import WebSocketApp, ABNF
 import json
 import threading
 
@@ -247,49 +247,91 @@ class StreamingRecorder(AudioRecorder):
         self.ws = None
         self.streaming = False
         self.accumulated_text = []
+        self.connection_established = False
+        self.connection_timeout = 5  # seconds
 
     def _connect_websocket(self):
         """Establish WebSocket connection"""
-        ws_url = f"ws://{CONFIG['HOST']}:{CONFIG['PORT']}/stream"
-        self.ws = websocket.WebSocketApp(
-            ws_url,
-            on_open=self._on_ws_open,
-            on_message=self._on_ws_message,
-            on_error=self._on_ws_error,
-            on_close=self._on_ws_close
-        )
-        threading.Thread(target=self.ws.run_forever).start()
+        ws_url = CONFIG["WS_URL"] + "/stream"
+        print(f"\nConnecting to WebSocket at {ws_url}...")
+        
+        try:
+            self.ws = WebSocketApp(
+                ws_url,
+                on_open=self._on_ws_open,
+                on_message=self._on_ws_message,
+                on_error=self._on_ws_error,
+                on_close=self._on_ws_close
+            )
+            
+            # Start WebSocket in a separate thread
+            ws_thread = threading.Thread(target=self.ws.run_forever)
+            ws_thread.daemon = True
+            ws_thread.start()
+            
+            # Wait for connection with timeout
+            start_time = time.time()
+            while not self.connection_established:
+                if time.time() - start_time > self.connection_timeout:
+                    play_sound("error")
+                    print("\nError: Could not establish WebSocket connection")
+                    return False
+                time.sleep(0.1)
+            
+            return True
+            
+        except Exception as e:
+            print(f"\nError creating WebSocket connection: {e}")
+            return False
 
     def _on_ws_open(self, ws):
         """Send API key on connection"""
+        print("WebSocket connected, authenticating...")
         ws.send(CONFIG["API_KEY"])
+        self.connection_established = True
 
     def _on_ws_message(self, ws, message):
         """Handle incoming transcription"""
         try:
             data = json.loads(message)
-            if "text" in data:
+            if "error" in data:
+                print(f"\nServer error: {data['error']}")
+                self.streaming = False
+            elif "text" in data:
                 self.accumulated_text.append(data["text"])
                 print(f"\rPartial transcription: {data['text']}", end="", flush=True)
+        except json.JSONDecodeError:
+            print(f"\nError: Invalid JSON message from server: {message}")
         except Exception as e:
             print(f"\nError processing message: {e}")
 
     def _on_ws_error(self, ws, error):
+        play_sound("error")
         print(f"\nWebSocket error: {error}")
         self.streaming = False
 
     def _on_ws_close(self, ws, close_status_code, close_msg):
-        print("\nWebSocket connection closed")
+        if self.streaming:  # Only show error if not intentionally closed
+            play_sound("error")
+            print(f"\nWebSocket connection closed unexpectedly: {close_msg}")
         self.streaming = False
 
     def record_stream(self):
         """Record and stream audio"""
+        print("\nInitializing streaming mode...")
+        
         if not check_server():
+            print("Server check failed!")
             return None
 
+        write_pid()
         self.streaming = True
-        self._connect_websocket()
-        time.sleep(1)  # Wait for connection
+        
+        print("Attempting to establish WebSocket connection...")
+        if not self._connect_websocket():
+            print("Failed to establish WebSocket connection!")
+            cleanup_pid()
+            return None
 
         try:
             stream = self.p.open(
@@ -308,11 +350,17 @@ class StreamingRecorder(AudioRecorder):
             listener.start()
 
             while self.streaming and self.recording:
+                if not self.ws or not self.ws.sock or not self.ws.sock.connected:
+                    play_sound("error")
+                    print("\nLost connection to server")
+                    break
                 time.sleep(0.1)
 
             stream.stop_stream()
             stream.close()
-            self.ws.close()
+            
+            if self.ws:
+                self.ws.close()
 
             # Combine all transcriptions
             final_text = " ".join(self.accumulated_text)
@@ -324,9 +372,14 @@ class StreamingRecorder(AudioRecorder):
                 )
                 play_sound("complete")
                 print(f"\nFinal transcription: {final_text}")
-            return final_text
+                return final_text
+            else:
+                play_sound("empty")
+                print("\nNo transcription received")
+                return None
 
         except Exception as e:
+            play_sound("error")
             print(f"\nError in streaming: {e}")
             return None
         finally:
@@ -335,21 +388,24 @@ class StreamingRecorder(AudioRecorder):
 
     def _stream_callback(self, in_data, frame_count, time_info, status):
         """Handle audio stream data"""
-        if self.streaming and self.ws and self.ws.sock.connected:
-            self.ws.send(in_data, websocket.ABNF.OPCODE_BINARY)
+        if status:
+            print(f"\nStream error: {status}")
+        
+        if self.streaming and self.ws and hasattr(self.ws, 'sock') and self.ws.sock and self.ws.sock.connected:
+            try:
+                self.ws.send(in_data, ABNF.OPCODE_BINARY)
+            except Exception as e:
+                print(f"\nError sending audio data: {e}")
+                self.streaming = False
         return (in_data, pyaudio.paContinue)
 
 
 def main():
-    global recorder  # Add this line
-    parser = argparse.ArgumentParser(
-        description="Audio recording and transcription client"
-    )
+    global recorder
+    parser = argparse.ArgumentParser(description="Audio recording and transcription client")
     parser.add_argument("--start", action="store_true", help="Start recording")
     parser.add_argument("--stop", action="store_true", help="Stop recording")
-    parser.add_argument(
-        "--test-sounds", action="store_true", help="Test all notification sounds"
-    )
+    parser.add_argument("--test-sounds", action="store_true", help="Test all notification sounds")
     parser.add_argument("--stream", action="store_true", help="Use streaming mode")
     args = parser.parse_args()
 
@@ -366,13 +422,13 @@ def main():
         if read_pid():
             print("Recording already in progress")
             return
-        recorder = AudioRecorder()  # Now assigns to global variable
+        recorder = AudioRecorder()
         recorder.record(auto_stop=True)
     elif args.stream:
         recorder = StreamingRecorder()
         recorder.record_stream()
     else:
-        recorder = AudioRecorder()  # Now assigns to global variable
+        recorder = AudioRecorder()
         recorder.record()
 
 
