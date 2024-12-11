@@ -1,4 +1,5 @@
 from flask import Flask, request
+from flask_sock import Sock
 from faster_whisper import WhisperModel
 import os
 import logging
@@ -7,6 +8,10 @@ import gc
 import wave
 import time
 import atexit
+import numpy as np
+import json
+import queue
+import threading
 
 # Add the project root to Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,6 +24,7 @@ def cleanup():
 
 
 app = Flask(__name__)
+sock = Sock(app)
 model = WhisperModel(
     CONFIG["MODEL_SIZE"], device=CONFIG["DEVICE"], compute_type=CONFIG["COMPUTE_TYPE"]
 )
@@ -33,6 +39,87 @@ cli.show_server_banner = lambda *x: None
 log = logging.getLogger("werkzeug")
 log.setLevel(logging.ERROR)
 logging.getLogger("faster_whisper").setLevel(logging.ERROR)
+
+
+class StreamingTranscriber:
+    def __init__(self, model):
+        self.model = model
+        self.buffer = queue.Queue()
+        self.is_processing = False
+        self.current_audio = []
+        self.min_audio_length = 1.0  # Process at least 1 second of audio
+
+    def add_audio(self, audio_data):
+        """Add audio data to buffer"""
+        self.current_audio.extend(audio_data)
+        audio_length = len(self.current_audio) / CONFIG["RATE"]
+        
+        if audio_length >= self.min_audio_length and not self.is_processing:
+            self.is_processing = True
+            return self._process_audio()
+        return None
+
+    def _process_audio(self):
+        """Process accumulated audio"""
+        try:
+            # Convert audio data to temporary file
+            with wave.open(CONFIG["TEMP_FILE"], 'wb') as wf:
+                wf.setnchannels(CONFIG["CHANNELS"])
+                wf.setsampwidth(2)  # 16-bit audio
+                wf.setframerate(CONFIG["RATE"])
+                wf.writeframes(b''.join(self.current_audio))
+
+            # Transcribe
+            segments, info = self.model.transcribe(
+                CONFIG["TEMP_FILE"],
+                beam_size=CONFIG["BEAM_SIZE"],
+                without_timestamps=False
+            )
+
+            # Get text and clear buffer
+            text = " ".join(segment.text for segment in segments)
+            self.current_audio = []
+            return text
+
+        except Exception as e:
+            print(f"Error in streaming transcription: {e}")
+            return None
+        finally:
+            self.is_processing = False
+            if os.path.exists(CONFIG["TEMP_FILE"]):
+                os.remove(CONFIG["TEMP_FILE"])
+
+
+@sock.route('/stream')
+def stream(ws):
+    """Handle streaming transcription requests"""
+    # Verify API key
+    api_key = ws.receive()  # First message should be API key
+    if api_key != CONFIG["API_KEY"]:
+        ws.send(json.dumps({"error": "Unauthorized"}))
+        return
+
+    print("\nStarting streaming transcription session...")
+    transcriber = StreamingTranscriber(model)
+    
+    try:
+        while True:
+            data = ws.receive()  # Receive audio data
+            if data == "END_STREAM":
+                break
+                
+            # Convert received data to numpy array
+            audio_data = np.frombuffer(data, dtype=np.int16)
+            
+            # Process audio
+            result = transcriber.add_audio(audio_data)
+            if result:
+                ws.send(json.dumps({"text": result}))
+                
+    except Exception as e:
+        print(f"Streaming error: {e}")
+    finally:
+        print("Streaming session ended")
 
 
 @app.route("/transcribe", methods=["POST"])

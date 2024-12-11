@@ -16,6 +16,9 @@ import numpy as np
 import sounddevice as sd
 import time
 import signal
+import websocket
+import json
+import threading
 
 recorder = None  # Global variable to store recorder instance
 
@@ -238,6 +241,105 @@ def stop_recording():
     return False
 
 
+class StreamingRecorder(AudioRecorder):
+    def __init__(self):
+        super().__init__()
+        self.ws = None
+        self.streaming = False
+        self.accumulated_text = []
+
+    def _connect_websocket(self):
+        """Establish WebSocket connection"""
+        ws_url = f"ws://{CONFIG['HOST']}:{CONFIG['PORT']}/stream"
+        self.ws = websocket.WebSocketApp(
+            ws_url,
+            on_open=self._on_ws_open,
+            on_message=self._on_ws_message,
+            on_error=self._on_ws_error,
+            on_close=self._on_ws_close
+        )
+        threading.Thread(target=self.ws.run_forever).start()
+
+    def _on_ws_open(self, ws):
+        """Send API key on connection"""
+        ws.send(CONFIG["API_KEY"])
+
+    def _on_ws_message(self, ws, message):
+        """Handle incoming transcription"""
+        try:
+            data = json.loads(message)
+            if "text" in data:
+                self.accumulated_text.append(data["text"])
+                print(f"\rPartial transcription: {data['text']}", end="", flush=True)
+        except Exception as e:
+            print(f"\nError processing message: {e}")
+
+    def _on_ws_error(self, ws, error):
+        print(f"\nWebSocket error: {error}")
+        self.streaming = False
+
+    def _on_ws_close(self, ws, close_status_code, close_msg):
+        print("\nWebSocket connection closed")
+        self.streaming = False
+
+    def record_stream(self):
+        """Record and stream audio"""
+        if not check_server():
+            return None
+
+        self.streaming = True
+        self._connect_websocket()
+        time.sleep(1)  # Wait for connection
+
+        try:
+            stream = self.p.open(
+                format=CONFIG["AUDIO_FORMAT"],
+                channels=CONFIG["CHANNELS"],
+                rate=CONFIG["RATE"],
+                input=True,
+                frames_per_buffer=CONFIG["CHUNK"],
+                stream_callback=self._stream_callback
+            )
+
+            play_sound("start")
+            print("\nStreaming... Press SPACE to stop")
+
+            listener = keyboard.Listener(on_press=self.on_press)
+            listener.start()
+
+            while self.streaming and self.recording:
+                time.sleep(0.1)
+
+            stream.stop_stream()
+            stream.close()
+            self.ws.close()
+
+            # Combine all transcriptions
+            final_text = " ".join(self.accumulated_text)
+            if final_text.strip():
+                subprocess.run(
+                    ["xclip", "-selection", "clipboard"],
+                    input=final_text.encode(),
+                    check=True,
+                )
+                play_sound("complete")
+                print(f"\nFinal transcription: {final_text}")
+            return final_text
+
+        except Exception as e:
+            print(f"\nError in streaming: {e}")
+            return None
+        finally:
+            self.p.terminate()
+            cleanup_pid()
+
+    def _stream_callback(self, in_data, frame_count, time_info, status):
+        """Handle audio stream data"""
+        if self.streaming and self.ws and self.ws.sock.connected:
+            self.ws.send(in_data, websocket.ABNF.OPCODE_BINARY)
+        return (in_data, pyaudio.paContinue)
+
+
 def main():
     global recorder  # Add this line
     parser = argparse.ArgumentParser(
@@ -248,6 +350,7 @@ def main():
     parser.add_argument(
         "--test-sounds", action="store_true", help="Test all notification sounds"
     )
+    parser.add_argument("--stream", action="store_true", help="Use streaming mode")
     args = parser.parse_args()
 
     if args.test_sounds:
@@ -265,6 +368,9 @@ def main():
             return
         recorder = AudioRecorder()  # Now assigns to global variable
         recorder.record(auto_stop=True)
+    elif args.stream:
+        recorder = StreamingRecorder()
+        recorder.record_stream()
     else:
         recorder = AudioRecorder()  # Now assigns to global variable
         recorder.record()
