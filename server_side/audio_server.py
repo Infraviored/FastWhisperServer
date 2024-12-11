@@ -49,6 +49,8 @@ class StreamingTranscriber:
         self.is_processing = False
         self.current_audio = []
         self.min_audio_length = 1.0  # Process at least 1 second of audio
+        self.rate = CONFIG["RATE"]
+        self.channels = CONFIG["CHANNELS"]
 
     def add_audio(self, audio_data):
         """Add audio data to buffer"""
@@ -58,14 +60,14 @@ class StreamingTranscriber:
                 audio_data = np.frombuffer(audio_data, dtype=np.int16)
             
             self.current_audio.extend(audio_data.tolist())
-            audio_length = len(self.current_audio) / CONFIG["RATE"]
+            audio_length = len(self.current_audio) / self.rate
             
             if audio_length >= self.min_audio_length and not self.is_processing:
                 self.is_processing = True
                 return self._process_audio()
             return None
         except Exception as e:
-            print(f"Error adding audio data: {e}")
+            print(f"Error adding audio data: {str(e)}")
             return None
 
     def _process_audio(self):
@@ -73,9 +75,9 @@ class StreamingTranscriber:
         try:
             # Convert audio data to temporary file
             with wave.open(CONFIG["TEMP_FILE"], 'wb') as wf:
-                wf.setnchannels(CONFIG["CHANNELS"])
+                wf.setnchannels(self.channels)
                 wf.setsampwidth(2)  # 16-bit audio
-                wf.setframerate(CONFIG["RATE"])
+                wf.setframerate(self.rate)
                 audio_bytes = np.array(self.current_audio, dtype=np.int16).tobytes()
                 wf.writeframes(audio_bytes)
 
@@ -89,10 +91,11 @@ class StreamingTranscriber:
             # Get text and clear buffer
             text = " ".join(segment.text for segment in segments)
             self.current_audio = []
+            print(f"Processed audio length: {len(audio_bytes)/2/self.rate:.2f}s")
             return text
 
         except Exception as e:
-            print(f"Error in streaming transcription: {e}")
+            print(f"Error in streaming transcription: {str(e)}")
             return None
         finally:
             self.is_processing = False
@@ -126,11 +129,11 @@ def stream(ws):
                     ws.send(json.dumps({"text": result}))
                     
             except Exception as e:
-                print(f"Error processing audio chunk: {e}")
+                print(f"Error processing audio chunk: {str(e)}")
                 break
                 
     except Exception as e:
-        print(f"Streaming error: {e}")
+        print(f"Streaming error: {str(e)}")
     finally:
         print("Streaming session ended")
 

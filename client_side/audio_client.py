@@ -313,7 +313,7 @@ class StreamingRecorder(AudioRecorder):
     def _on_ws_close(self, ws, close_status_code, close_msg):
         if self.streaming:  # Only show error if not intentionally closed
             play_sound("error")
-            print(f"\nWebSocket connection closed unexpectedly: {close_msg}")
+            print(f"\nWebSocket connection closed: {close_status_code} - {close_msg}")
         self.streaming = False
 
     def record_stream(self):
@@ -395,8 +395,9 @@ class StreamingRecorder(AudioRecorder):
             try:
                 self.ws.send(in_data, ABNF.OPCODE_BINARY)
             except Exception as e:
-                print(f"\nError sending audio data: {e}")
+                print(f"\nError sending audio data: {str(e)}")
                 self.streaming = False
+                return (None, pyaudio.paComplete)
         return (in_data, pyaudio.paContinue)
 
 
