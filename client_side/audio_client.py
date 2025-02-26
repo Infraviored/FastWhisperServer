@@ -1,5 +1,7 @@
 import sys
 import os
+import signal
+import atexit
 
 # Add the project root to Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,6 +21,7 @@ import signal
 from websocket import WebSocketApp, ABNF
 import json
 import threading
+import traceback
 
 recorder = None  # Global variable to store recorder instance
 
@@ -106,6 +109,41 @@ def handle_stop_signal(signum, frame):
     global recorder
     if recorder and hasattr(recorder, "recording"):
         recorder.recording = False
+
+
+def cleanup_resources():
+    """Cleanup function to ensure all resources are released"""
+    print("Cleaning up resources...")
+    try:
+        # Stop any active recording
+        if 'recorder' in globals() and recorder:
+            recorder.recording = False
+            recorder.streaming = False
+            
+            # Close WebSocket if it exists
+            if hasattr(recorder, 'ws') and recorder.ws:
+                try:
+                    recorder.ws.close()
+                except:
+                    pass
+            
+            # Terminate PyAudio
+            if hasattr(recorder, 'p'):
+                try:
+                    recorder.p.terminate()
+                except:
+                    pass
+    except Exception as e:
+        print(f"Error during cleanup: {e}")
+    
+    # Always remove PID file
+    cleanup_pid()
+
+
+# Register cleanup functions
+atexit.register(cleanup_resources)
+signal.signal(signal.SIGTERM, lambda signo, frame: cleanup_resources())
+signal.signal(signal.SIGINT, lambda signo, frame: cleanup_resources())
 
 
 class AudioRecorder:
@@ -215,30 +253,13 @@ class AudioRecorder:
                 except Exception as e:
                     print(f"Error removing temporary file: {e}")
 
-
-def test_sounds():
-    """Test all notification sounds"""
-    print("Testing all sounds...")
-    for sound_type in CONFIG["SOUNDS"]:
-        print(f"Playing {sound_type} sound...")
-        play_sound(sound_type)
-        time.sleep(2)
-
-
-def stop_recording():
-    """Signal the recording process to stop"""
-    pid = read_pid()
-    if pid:
-        try:
-            os.kill(pid, signal.SIGUSR1)  # Send USR1 signal instead of TERM
-            print("Stop signal sent to recording process")
-            return True
-        except ProcessLookupError:
-            cleanup_pid()
-            print("No recording process found")
-        except Exception as e:
-            print(f"Error signaling recording process: {e}")
-    return False
+    def __del__(self):
+        """Destructor to ensure cleanup"""
+        if hasattr(self, 'p'):
+            try:
+                self.p.terminate()
+            except:
+                pass
 
 
 class StreamingRecorder(AudioRecorder):
@@ -342,6 +363,7 @@ class StreamingRecorder(AudioRecorder):
                 frames_per_buffer=CONFIG["CHUNK"],
                 stream_callback=self._stream_callback
             )
+            self.stream = stream  # Store reference for cleanup
 
             play_sound("start")
             print("\nStreaming... Press SPACE to stop")
@@ -379,12 +401,24 @@ class StreamingRecorder(AudioRecorder):
                 return None
 
         except Exception as e:
-            play_sound("error")
-            print(f"\nError in streaming: {e}")
+            print(f"\nSession {self.session_id}: Stream error: {str(e)}")
+            print(f"Traceback: {traceback.format_exc()}")
             return None
         finally:
-            self.p.terminate()
+            # Ensure everything is cleaned up
+            if self.stream:
+                try:
+                    self.stream.stop_stream()
+                    self.stream.close()
+                except:
+                    pass
+            if self.p:
+                try:
+                    self.p.terminate()
+                except:
+                    pass
             cleanup_pid()
+            print(f"Session {self.session_id}: Cleanup complete")
 
     def _stream_callback(self, in_data, frame_count, time_info, status):
         """Handle audio stream data"""
@@ -401,46 +435,78 @@ class StreamingRecorder(AudioRecorder):
         return (in_data, pyaudio.paContinue)
 
 
+def test_sounds():
+    """Test all notification sounds"""
+    print("Testing all sounds...")
+    for sound_type in CONFIG["SOUNDS"]:
+        print(f"Playing {sound_type} sound...")
+        play_sound(sound_type)
+        time.sleep(2)
+
+
+def stop_recording():
+    """Signal the recording process to stop"""
+    pid = read_pid()
+    if pid:
+        try:
+            os.kill(pid, signal.SIGUSR1)  # Send USR1 signal instead of TERM
+            print("Stop signal sent to recording process")
+            return True
+        except ProcessLookupError:
+            cleanup_pid()
+            print("No recording process found")
+        except Exception as e:
+            print(f"Error signaling recording process: {e}")
+    return False
+
+
 def main():
     global recorder
-    parser = argparse.ArgumentParser(description="Audio recording and transcription client")
-    parser.add_argument("--start", action="store_true", help="Start recording")
-    parser.add_argument("--stop", action="store_true", help="Stop recording")
-    parser.add_argument("--test-sounds", action="store_true", help="Test all notification sounds")
-    parser.add_argument("--stream", action="store_true", help="Use streaming mode")
-    args = parser.parse_args()
+    try:
+        parser = argparse.ArgumentParser(description="Audio recording and transcription client")
+        parser.add_argument("--start", action="store_true", help="Start recording")
+        parser.add_argument("--stop", action="store_true", help="Stop recording")
+        parser.add_argument("--test-sounds", action="store_true", help="Test all notification sounds")
+        parser.add_argument("--stream", action="store_true", help="Use streaming mode")
+        args = parser.parse_args()
 
-    if args.test_sounds:
-        test_sounds()
-        return
-
-    if args.stop:
-        stop_recording()
-        return
-
-    if args.start:
-        # Check if already running
-        if read_pid():
-            print("Recording already in progress")
+        if args.test_sounds:
+            test_sounds()
             return
-        recorder = AudioRecorder()
-        recorder.record(auto_stop=True)
-    elif args.stream:
-        recorder = StreamingRecorder()
-        recorder.record_stream()
-    else:
-        recorder = AudioRecorder()
-        recorder.record()
+
+        if args.stop:
+            stop_recording()
+            return
+
+        if args.start:
+            if read_pid():
+                print("Recording already in progress")
+                return
+            recorder = AudioRecorder()
+            recorder.record(auto_stop=True)
+        elif args.stream:
+            recorder = StreamingRecorder()
+            recorder.record_stream()
+        else:
+            recorder = AudioRecorder()
+            recorder.record()
+    except Exception as e:
+        print(f"Error in main: {e}")
+        cleanup_resources()
+    finally:
+        cleanup_resources()
 
 
 if __name__ == "__main__":
-    # Suppress ALSA error messages
-    devnull = os.open(os.devnull, os.O_WRONLY)
-    old_stderr = os.dup(2)
-    os.dup2(devnull, 2)
-    os.close(devnull)
+    try:
+        # Suppress ALSA error messages
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        old_stderr = os.dup(2)
+        os.dup2(devnull, 2)
+        os.close(devnull)
 
-    main()
-
-    # Restore stderr
-    os.dup2(old_stderr, 2)
+        main()
+    finally:
+        # Restore stderr and ensure cleanup
+        os.dup2(old_stderr, 2)
+        cleanup_resources()

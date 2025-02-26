@@ -4,6 +4,23 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../config/config.sh"
 
+# Function to cleanup local processes
+cleanup_local() {
+    echo "Cleaning up local processes..."
+    
+    # Kill any hanging audio client processes
+    pkill -f "python3.*audio_client.py"
+    
+    # Remove PID file if it exists
+    rm -f /tmp/whisper_recorder.pid
+    
+    # Kill any hanging SSH tunnels
+    pkill -f "ssh.*$SERVER_PORT:127.0.0.1:$SERVER_PORT"
+}
+
+# Register cleanup on script exit
+trap cleanup_local EXIT
+
 # Function to check if server is running on remote host
 check_remote_server() {
     ssh -p $SSH_PORT $SSH_USER@$SSH_HOST "pgrep -f 'python3.*audio_server.py'" > /dev/null
