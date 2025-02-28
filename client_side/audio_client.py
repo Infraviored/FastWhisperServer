@@ -302,71 +302,87 @@ class AudioRecorder:
             wf.close()
 
             print("Sending to server for transcription...")
-            url = f"{CONFIG['SERVER_URL']}/transcribe_with_progress"
+            url = f"{CONFIG['SERVER_URL']}/transcribe"
             headers = {"X-API-Key": CONFIG["API_KEY"]}
 
-            # Start a thread to monitor server progress
-            self._start_segment_monitor()
+            # Start a simple thread to play sounds during transcription
+            def play_progress_sounds():
+                try:
+                    # Calculate audio duration and expected segments
+                    audio_duration = len(self.frames) * CONFIG["CHUNK"] / CONFIG["RATE"]
+                    expected_segments = max(1, int(audio_duration / 30))
+                    
+                    # Skip for short recordings
+                    if expected_segments <= 1:
+                        return
+                    
+                    # Wait for initial processing
+                    time.sleep(2)
+                    
+                    # Play a sound for each segment except the last
+                    for i in range(1, expected_segments):
+                        # Play sound with increasing pitch
+                        freq = 440 + (i * 50)  # Increase pitch for each segment
+                        samples = generate_beep(freq, 0.15)
+                        sd.play(samples, CONFIG["RATE"])
+                        sd.wait()
+                        print(f"\nSegment {i}/{expected_segments} processed")
+                        
+                        # Wait before next sound
+                        time.sleep(2.5)
+                except Exception as e:
+                    print(f"Error in progress sound player: {e}")
+            
+            # Start the thread
+            sound_thread = threading.Thread(target=play_progress_sounds)
+            sound_thread.daemon = True
+            sound_thread.start()
 
+            # Send the file for transcription
             with open(CONFIG["TEMP_FILE"], "rb") as audio_file:
-                # Use a streaming response to get progress updates
-                with requests.post(
-                    url, files={"file": audio_file}, headers=headers, stream=True
-                ) as response:
-                    
-                    if response.status_code != 200:
-                        print(f"Server error: {response.text}")
-                        return None
-                    
-                    # Process streaming response for progress updates
-                    final_text = ""
-                    segment_count = 0
-                    expected_segments = 1
-                    
-                    for line in response.iter_lines():
-                        if not line:
-                            continue
-                        
-                        data = json.loads(line.decode('utf-8'))
-                        
-                        if "segment_progress" in data:
-                            # Play a sound with pitch based on progress
-                            progress = data["segment_progress"]
-                            current_segment = progress["current"]
-                            total_segments = progress["total"]
-                            expected_segments = total_segments
-                            
-                            # Only play for segments before the final one
-                            if current_segment < total_segments:
-                                # Calculate pitch - start low and increase with each segment
-                                base_freq = 220  # A3 note
-                                freq = base_freq * (1 + 0.5 * (current_segment / total_segments))
-                                
-                                # Create and play a custom pitched sound
-                                samples = generate_beep(freq, 0.15)
-                                sd.play(samples, CONFIG["RATE"])
-                                sd.wait()
-                                
-                                print(f"\nSegment {current_segment}/{total_segments} processed")
-                        
-                        elif "text" in data:
-                            final_text = data["text"]
-                    
-                    if not final_text.strip():
-                        play_sound("empty")
-                        print("\nTranscription was empty!")
-                        return None
-                    
-                    subprocess.run(
-                        ["xclip", "-selection", "clipboard"],
-                        input=final_text.encode(),
-                        check=True,
-                    )
-                    play_sound("complete")
-                    print("\nTranscription copied to clipboard!")
-                    print(f"Text: {final_text}")
-                    return final_text
+                response = requests.post(
+                    url, files={"file": audio_file}, headers=headers
+                )
 
+                if response.status_code == 200:
+                    try:
+                        data = json.loads(response.text)
+                        text = data["text"]
+                        
+                        if not text.strip():
+                            play_sound("empty")
+                            print("\nTranscription was empty!")
+                            return None
+                        
+                        subprocess.run(
+                            ["xclip", "-selection", "clipboard"],
+                            input=text.encode(),
+                            check=True,
+                        )
+                        play_sound("complete")
+                        print("\nTranscription copied to clipboard!")
+                        print(f"Text: {text}")
+                        return text
+                    except json.JSONDecodeError:
+                        # Handle old format (plain text)
+                        text = response.text
+                        if not text.strip():
+                            play_sound("empty")
+                            print("\nTranscription was empty!")
+                            return None
+                        
+                        subprocess.run(
+                            ["xclip", "-selection", "clipboard"],
+                            input=text.encode(),
+                            check=True,
+                        )
+                        play_sound("complete")
+                        print("\nTranscription copied to clipboard!")
+                        print(f"Text: {text}")
+                        return text
+                else:
+                    print(f"Server error: {response.text}")
+                    return None
         except Exception as e:
             print(f"Error during save/transcribe: {e}")
             return None
