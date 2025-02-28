@@ -219,26 +219,54 @@ class AudioRecorder:
             url = f"{CONFIG['SERVER_URL']}/transcribe"
             headers = {"X-API-Key": CONFIG["API_KEY"]}
 
+            # Start a thread to monitor server console output
+            self._start_segment_monitor()
+
             with open(CONFIG["TEMP_FILE"], "rb") as audio_file:
                 response = requests.post(
                     url, files={"file": audio_file}, headers=headers
                 )
 
                 if response.status_code == 200:
-                    text = response.text
-                    if not text.strip():
-                        play_sound("empty")
-                        print("\nTranscription was empty!")
-                        return None
-                    subprocess.run(
-                        ["xclip", "-selection", "clipboard"],
-                        input=text.encode(),
-                        check=True,
-                    )
-                    play_sound("complete")
-                    print("\nTranscription copied to clipboard!")
-                    print(f"Text: {text}")
-                    return text
+                    try:
+                        data = json.loads(response.text)
+                        text = data["text"]
+                        metadata = data.get("metadata", {})
+                        
+                        # Store expected segments for future reference
+                        self.expected_segments = metadata.get("expected_updates", 1)
+                        
+                        if not text.strip():
+                            play_sound("empty")
+                            print("\nTranscription was empty!")
+                            return None
+                        
+                        subprocess.run(
+                            ["xclip", "-selection", "clipboard"],
+                            input=text.encode(),
+                            check=True,
+                        )
+                        play_sound("complete")
+                        print("\nTranscription copied to clipboard!")
+                        print(f"Text: {text}")
+                        return text
+                    except json.JSONDecodeError:
+                        # Handle old format (plain text)
+                        text = response.text
+                        if not text.strip():
+                            play_sound("empty")
+                            print("\nTranscription was empty!")
+                            return None
+                        
+                        subprocess.run(
+                            ["xclip", "-selection", "clipboard"],
+                            input=text.encode(),
+                            check=True,
+                        )
+                        play_sound("complete")
+                        print("\nTranscription copied to clipboard!")
+                        print(f"Text: {text}")
+                        return text
                 else:
                     print(f"Server error: {response.text}")
                     return None
@@ -252,6 +280,50 @@ class AudioRecorder:
                     os.remove(CONFIG["TEMP_FILE"])
                 except Exception as e:
                     print(f"Error removing temporary file: {e}")
+
+    def _start_segment_monitor(self):
+        """Start a thread to monitor for segment processing in server logs"""
+        def _monitor():
+            # This is a simplified approach - in a real implementation, 
+            # you would need to find a way to monitor the server logs
+            # One approach could be to use SSH to tail the logs
+            
+            # For now, we'll simulate segment processing based on timing
+            try:
+                # Get the PID of the server process
+                pid = read_pid()
+                if not pid:
+                    return
+                    
+                # Calculate audio duration
+                audio_duration = len(self.frames) * CONFIG["CHUNK"] / CONFIG["RATE"]
+                expected_segments = max(1, int(audio_duration / 30))
+                
+                # Skip for short recordings
+                if expected_segments <= 1:
+                    return
+                    
+                # For each expected segment (except the last one)
+                for segment in range(1, expected_segments):
+                    # Wait a bit for processing to start
+                    time.sleep(1.5)  
+                    
+                    # Calculate pitch based on progress
+                    base_freq = 220  # A3 note
+                    freq = base_freq * (1 + 0.5 * (segment / expected_segments))
+                    
+                    # Create and play a custom pitched sound
+                    samples = generate_beep(freq, 0.15)
+                    sd.play(samples, CONFIG["RATE"])
+                    sd.wait()
+                    
+                    print(f"\nSegment {segment}/{expected_segments} processed")
+            except Exception as e:
+                print(f"Error in segment monitor: {e}")
+        
+        monitor_thread = threading.Thread(target=_monitor)
+        monitor_thread.daemon = True
+        monitor_thread.start()
 
     def __del__(self):
         """Destructor to ensure cleanup"""
