@@ -57,7 +57,7 @@ class StreamingTranscriber:
         self.buffer = queue.Queue()
         self.is_processing = False
         self.current_audio = []
-        self.min_audio_length = 1.0
+        self.min_audio_length = 0.5
         self.rate = CONFIG["RATE"]
         self.channels = CONFIG["CHANNELS"]
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -151,10 +151,12 @@ def stream(ws):
         while True:
             try:
                 data = ws.receive()
+                
+                # Check for end signal
                 if data == "END_STREAM":
                     logger.info(f"Session {session_id}: Received end stream signal")
                     break
-                
+                    
                 # Process audio
                 result = transcriber.add_audio(data)
                 if result:

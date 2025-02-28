@@ -69,6 +69,8 @@ def play_sound(sound_type):
             sd.wait()
     except Exception as e:
         print(f"Error playing {sound_type} sound: {e}")
+        # Don't let sound errors stop the program
+        pass
 
 
 def check_server():
@@ -270,6 +272,9 @@ class StreamingRecorder(AudioRecorder):
         self.accumulated_text = []
         self.connection_established = False
         self.connection_timeout = 5  # seconds
+        self.session_id = time.strftime("%Y%m%d_%H%M%S")
+        self.min_recording_time = 2.0  # Ensure at least 2 seconds of audio
+        self.start_time = None
 
     def _connect_websocket(self):
         """Establish WebSocket connection"""
@@ -333,9 +338,16 @@ class StreamingRecorder(AudioRecorder):
 
     def _on_ws_close(self, ws, close_status_code, close_msg):
         if self.streaming:  # Only show error if not intentionally closed
-            play_sound("error")
             print(f"\nWebSocket connection closed: {close_status_code} - {close_msg}")
         self.streaming = False
+
+    def on_press(self, key):
+        """Override parent method to handle both recording and streaming flags"""
+        if key == keyboard.Key.space:
+            print("\nStopping recording...")
+            self.recording = False
+            self.streaming = False
+            return False
 
     def record_stream(self):
         """Record and stream audio"""
@@ -347,6 +359,8 @@ class StreamingRecorder(AudioRecorder):
 
         write_pid()
         self.streaming = True
+        self.recording = True  # Make sure recording flag is set
+        self.start_time = time.time()  # Track when we started recording
         
         print("Attempting to establish WebSocket connection...")
         if not self._connect_websocket():
@@ -355,6 +369,7 @@ class StreamingRecorder(AudioRecorder):
             return None
 
         try:
+            # Create audio stream
             stream = self.p.open(
                 format=CONFIG["AUDIO_FORMAT"],
                 channels=CONFIG["CHANNELS"],
@@ -365,60 +380,92 @@ class StreamingRecorder(AudioRecorder):
             )
             self.stream = stream  # Store reference for cleanup
 
-            play_sound("start")
+            try:
+                play_sound("start")
+            except Exception as e:
+                print(f"Warning: Could not play start sound: {e}")
+                
             print("\nStreaming... Press SPACE to stop")
 
             listener = keyboard.Listener(on_press=self.on_press)
             listener.start()
 
+            # Main loop - keep running until stopped
             while self.streaming and self.recording:
                 if not self.ws or not self.ws.sock or not self.ws.sock.connected:
                     play_sound("error")
                     print("\nLost connection to server")
                     break
                 time.sleep(0.1)
+                
+                # Ensure minimum recording time
+                if time.time() - self.start_time < self.min_recording_time:
+                    continue
 
-            stream.stop_stream()
-            stream.close()
+            # Ensure we've recorded enough audio before stopping
+            elapsed = time.time() - self.start_time
+            if elapsed < self.min_recording_time:
+                print(f"\nEnsuring minimum recording time ({self.min_recording_time}s)...")
+                time.sleep(self.min_recording_time - elapsed)
+
+            # Clean up stream
+            if hasattr(self, 'stream') and self.stream:
+                try:
+                    self.stream.stop_stream()
+                    self.stream.close()
+                except Exception as e:
+                    print(f"\nError closing audio stream: {e}")
             
-            if self.ws:
-                self.ws.close()
+            # Close WebSocket connection gracefully
+            if self.ws and hasattr(self.ws, 'sock') and self.ws.sock:
+                try:
+                    # Send end signal to server
+                    print("\nSending end signal to server...")
+                    self.ws.send("END_STREAM")
+                    time.sleep(1.0)  # Give server more time to process final audio
+                    self.ws.close()
+                except Exception as e:
+                    print(f"\nError closing WebSocket: {e}")
 
             # Combine all transcriptions
             final_text = " ".join(self.accumulated_text)
             if final_text.strip():
-                subprocess.run(
-                    ["xclip", "-selection", "clipboard"],
-                    input=final_text.encode(),
-                    check=True,
-                )
-                play_sound("complete")
-                print(f"\nFinal transcription: {final_text}")
-                return final_text
+                try:
+                    subprocess.run(
+                        ["xclip", "-selection", "clipboard"],
+                        input=final_text.encode(),
+                        check=True,
+                    )
+                    play_sound("complete")
+                    print(f"\nFinal transcription: {final_text}")
+                    return final_text
+                except Exception as e:
+                    print(f"\nError copying to clipboard: {e}")
+                    return final_text
             else:
                 play_sound("empty")
                 print("\nNo transcription received")
                 return None
 
         except Exception as e:
-            print(f"\nSession {self.session_id}: Stream error: {str(e)}")
+            print(f"\nError in streaming session: {str(e)}")
             print(f"Traceback: {traceback.format_exc()}")
             return None
         finally:
             # Ensure everything is cleaned up
-            if self.stream:
+            if hasattr(self, 'stream') and self.stream:
                 try:
                     self.stream.stop_stream()
                     self.stream.close()
                 except:
                     pass
-            if self.p:
+            if hasattr(self, 'p') and self.p:
                 try:
                     self.p.terminate()
                 except:
                     pass
             cleanup_pid()
-            print(f"Session {self.session_id}: Cleanup complete")
+            print("Streaming session ended")
 
     def _stream_callback(self, in_data, frame_count, time_info, status):
         """Handle audio stream data"""
@@ -428,6 +475,7 @@ class StreamingRecorder(AudioRecorder):
         if self.streaming and self.ws and hasattr(self.ws, 'sock') and self.ws.sock and self.ws.sock.connected:
             try:
                 self.ws.send(in_data, ABNF.OPCODE_BINARY)
+                self.frames.append(in_data)  # Also store locally for backup
             except Exception as e:
                 print(f"\nError sending audio data: {str(e)}")
                 self.streaming = False
