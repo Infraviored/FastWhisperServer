@@ -63,6 +63,7 @@ class StreamingTranscriber:
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.total_audio_received = 0
         self.chunks_received = 0
+        self.last_process_time = time.time()
         logger.info(f"New streaming session initialized: {self.session_id}")
 
     def add_audio(self, audio_data):
@@ -84,8 +85,12 @@ class StreamingTranscriber:
             audio_length = len(self.current_audio) / self.rate
             logger.debug(f"Session {self.session_id}: Current buffer length: {audio_length:.2f}s ({len(self.current_audio)} samples)")
             
-            if audio_length >= self.min_audio_length and not self.is_processing:
+            # Process audio if we have enough and not currently processing
+            current_time = time.time()
+            if (audio_length >= self.min_audio_length and not self.is_processing and 
+                current_time - self.last_process_time >= 2.0):  # Process at most every 2 seconds
                 self.is_processing = True
+                self.last_process_time = current_time
                 logger.info(f"Session {self.session_id}: Processing audio chunk of {audio_length:.2f}s")
                 return self._process_audio()
             return None

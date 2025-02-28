@@ -277,6 +277,8 @@ class StreamingRecorder(AudioRecorder):
         self.start_time = None
         self.audio_chunks_sent = 0  # Track how many chunks we've sent
         self.total_audio_bytes = 0  # Track total audio bytes sent
+        self.stream = None
+        self.stream_active = False
 
     def _connect_websocket(self):
         """Establish WebSocket connection"""
@@ -374,16 +376,18 @@ class StreamingRecorder(AudioRecorder):
             return None
 
         try:
-            # Create audio stream
-            stream = self.p.open(
+            # Initialize PyAudio
+            self.p = pyaudio.PyAudio()
+            
+            # Create audio stream - NON-CALLBACK version
+            self.stream = self.p.open(
                 format=CONFIG["AUDIO_FORMAT"],
                 channels=CONFIG["CHANNELS"],
                 rate=CONFIG["RATE"],
                 input=True,
-                frames_per_buffer=CONFIG["CHUNK"],
-                stream_callback=self._stream_callback
+                frames_per_buffer=CONFIG["CHUNK"]
             )
-            self.stream = stream  # Store reference for cleanup
+            self.stream_active = True
 
             try:
                 play_sound("start")
@@ -401,11 +405,30 @@ class StreamingRecorder(AudioRecorder):
                     play_sound("error")
                     print("\nLost connection to server")
                     break
-                time.sleep(0.1)
+                
+                # Read audio data directly
+                if self.stream_active:
+                    try:
+                        audio_data = self.stream.read(CONFIG["CHUNK"], exception_on_overflow=False)
+                        if audio_data:
+                            self.ws.send(audio_data, ABNF.OPCODE_BINARY)
+                            self.frames.append(audio_data)  # Also store locally for backup
+                            
+                            # Update debug counters
+                            self.audio_chunks_sent += 1
+                            self.total_audio_bytes += len(audio_data)
+                            
+                            # Print debug info every 10 chunks
+                            if self.audio_chunks_sent % 10 == 0:
+                                print(f"\nDEBUG: Sent {self.audio_chunks_sent} audio chunks ({self.total_audio_bytes} bytes)")
+                    except Exception as e:
+                        print(f"\nError reading/sending audio: {e}")
                 
                 # Ensure minimum recording time
                 if time.time() - self.start_time < self.min_recording_time:
                     continue
+                
+                time.sleep(0.01)  # Small sleep to prevent CPU hogging
 
             # Ensure we've recorded enough audio before stopping
             elapsed = time.time() - self.start_time
@@ -418,10 +441,11 @@ class StreamingRecorder(AudioRecorder):
             print(f"DEBUG: Recording duration: {time.time() - self.start_time:.2f} seconds")
             
             # Clean up stream
-            if hasattr(self, 'stream') and self.stream:
+            if self.stream:
                 try:
                     self.stream.stop_stream()
                     self.stream.close()
+                    self.stream = None
                 except Exception as e:
                     print(f"\nError closing audio stream: {e}")
             
@@ -479,30 +503,6 @@ class StreamingRecorder(AudioRecorder):
                     pass
             cleanup_pid()
             print("Streaming session ended")
-
-    def _stream_callback(self, in_data, frame_count, time_info, status):
-        """Handle audio stream data"""
-        if status:
-            print(f"\nStream error: {status}")
-        
-        if self.streaming and self.ws and hasattr(self.ws, 'sock') and self.ws.sock and self.ws.sock.connected:
-            try:
-                self.ws.send(in_data, ABNF.OPCODE_BINARY)
-                self.frames.append(in_data)  # Also store locally for backup
-                
-                # Update debug counters
-                self.audio_chunks_sent += 1
-                self.total_audio_bytes += len(in_data)
-                
-                # Print debug info every 10 chunks
-                if self.audio_chunks_sent % 10 == 0:
-                    print(f"\nDEBUG: Sent {self.audio_chunks_sent} audio chunks ({self.total_audio_bytes} bytes)")
-                
-            except Exception as e:
-                print(f"\nError sending audio data: {str(e)}")
-                self.streaming = False
-                return (None, pyaudio.paComplete)
-        return (in_data, pyaudio.paContinue)
 
 
 def test_sounds():
