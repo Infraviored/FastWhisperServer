@@ -280,6 +280,7 @@ class StreamingRecorder(AudioRecorder):
         self.stream = None
         self.stream_active = False
         self.final_transcription = None
+        self.debug_mode = False  # Set to False to disable debug messages
 
     def _connect_websocket(self):
         """Establish WebSocket connection"""
@@ -322,12 +323,14 @@ class StreamingRecorder(AudioRecorder):
         auth_message = json.dumps({"api_key": CONFIG["API_KEY"]})
         ws.send(auth_message)
         self.connection_established = True
-        print("DEBUG: WebSocket connection established and authenticated")
+        print("Connection established")
 
     def _on_ws_message(self, ws, message):
         """Handle incoming transcription"""
         try:
-            print(f"\nDEBUG: Received message from server: {message}")
+            if self.debug_mode:
+                print(f"\nReceived message from server: {message}")
+                
             data = json.loads(message)
             if "error" in data:
                 print(f"\nServer error: {data['error']}")
@@ -336,15 +339,14 @@ class StreamingRecorder(AudioRecorder):
                 # Check if this is the final transcription
                 if data.get("final", False):
                     self.final_transcription = data["text"]
-                    print(f"\nFinal transcription received: {data['text']}")
+                    # Don't print here - we'll print once at the end
                 else:
                     self.accumulated_text.append(data["text"])
                     print(f"\rPartial transcription: {data['text']}", end="", flush=True)
         except json.JSONDecodeError:
-            print(f"\nError: Invalid JSON message from server: {message}")
+            print(f"\nError: Invalid message from server")
         except Exception as e:
             print(f"\nError processing message: {e}")
-            print(f"Traceback: {traceback.format_exc()}")
 
     def _on_ws_error(self, ws, error):
         play_sound("error")
@@ -353,41 +355,30 @@ class StreamingRecorder(AudioRecorder):
 
     def _on_ws_close(self, ws, close_status_code, close_msg):
         if self.streaming:  # Only show error if not intentionally closed
-            print(f"\nWebSocket connection closed: {close_status_code} - {close_msg}")
+            print(f"\nWebSocket connection closed")
         self.streaming = False
 
-    def on_press(self, key):
-        """Override parent method to handle both recording and streaming flags"""
-        if key == keyboard.Key.space:
-            print("\nStopping recording...")
-            self.recording = False
-            self.streaming = False
-            return False
-
     def record_stream(self):
-        """Record and stream audio"""
-        print("\nInitializing streaming mode...")
-        
-        if not check_server():
-            print("Server check failed!")
-            return None
-
-        write_pid()
-        self.streaming = True
-        self.recording = True  # Make sure recording flag is set
-        self.start_time = time.time()  # Track when we started recording
-        
-        print("Attempting to establish WebSocket connection...")
-        if not self._connect_websocket():
-            print("Failed to establish WebSocket connection!")
-            cleanup_pid()
-            return None
-
+        """Record audio and stream to server for real-time transcription"""
         try:
-            # Initialize PyAudio
-            self.p = pyaudio.PyAudio()
+            print("\nInitializing streaming mode...")
             
-            # Create audio stream - NON-CALLBACK version
+            # Check if server is available
+            if not check_server():
+                return None
+                
+            # Write PID for external control
+            write_pid()
+            
+            # Register signal handler
+            signal.signal(signal.SIGUSR1, handle_stop_signal)
+            
+            # Connect to WebSocket
+            if not self._connect_websocket():
+                return None
+                
+            # Initialize audio
+            self.p = pyaudio.PyAudio()
             self.stream = self.p.open(
                 format=CONFIG["AUDIO_FORMAT"],
                 channels=CONFIG["CHANNELS"],
@@ -396,17 +387,21 @@ class StreamingRecorder(AudioRecorder):
                 frames_per_buffer=CONFIG["CHUNK"]
             )
             self.stream_active = True
-
-            try:
-                play_sound("start")
-            except Exception as e:
-                print(f"Warning: Could not play start sound: {e}")
-                
-            print("\nStreaming... Press SPACE to stop")
-
-            listener = keyboard.Listener(on_press=self.on_press)
-            listener.start()
-
+            
+            # Start recording
+            self.frames = []
+            self.recording = True
+            self.streaming = True
+            self.start_time = time.time()
+            
+            play_sound("start")
+            print("\nStreaming... Press SPACE to stop\n")
+            
+            # Start keyboard listener
+            keyboard_thread = threading.Thread(target=self._keyboard_listener)
+            keyboard_thread.daemon = True
+            keyboard_thread.start()
+            
             # Main loop - keep running until stopped
             while self.streaming and self.recording:
                 if not self.ws or not self.ws.sock or not self.ws.sock.connected:
@@ -422,13 +417,13 @@ class StreamingRecorder(AudioRecorder):
                             self.ws.send(audio_data, ABNF.OPCODE_BINARY)
                             self.frames.append(audio_data)  # Also store locally for backup
                             
-                            # Update debug counters
+                            # Update counters
                             self.audio_chunks_sent += 1
                             self.total_audio_bytes += len(audio_data)
                             
-                            # Print debug info every 50 chunks
-                            if self.audio_chunks_sent % 50 == 0:
-                                print(f"\nDEBUG: Sent {self.audio_chunks_sent} audio chunks ({self.total_audio_bytes} bytes)")
+                            # Print debug info only in debug mode
+                            if self.debug_mode and self.audio_chunks_sent % 50 == 0:
+                                print(f"\nSent {self.audio_chunks_sent} audio chunks ({self.total_audio_bytes} bytes)")
                     except Exception as e:
                         print(f"\nError reading/sending audio: {e}")
                 
@@ -437,10 +432,6 @@ class StreamingRecorder(AudioRecorder):
                     continue
                 
                 time.sleep(0.01)  # Small sleep to prevent CPU hogging
-
-            # Print debug info about audio sent
-            print(f"\nDEBUG: Sent {self.audio_chunks_sent} audio chunks ({self.total_audio_bytes} bytes)")
-            print(f"DEBUG: Recording duration: {time.time() - self.start_time:.2f} seconds")
             
             # Clean up stream
             if self.stream:
@@ -491,7 +482,6 @@ class StreamingRecorder(AudioRecorder):
 
         except Exception as e:
             print(f"\nError in streaming session: {str(e)}")
-            print(f"Traceback: {traceback.format_exc()}")
             return None
         finally:
             # Ensure everything is cleaned up
@@ -507,7 +497,29 @@ class StreamingRecorder(AudioRecorder):
                 except:
                     pass
             cleanup_pid()
-            print("Streaming session ended")
+            print("Session ended")
+
+    # Add the keyboard listener method
+    def _keyboard_listener(self):
+        """Listen for keyboard input to stop recording"""
+        try:
+            with keyboard.Listener(on_press=self._on_key_press) as listener:
+                listener.join()
+        except Exception as e:
+            print(f"\nError in keyboard listener: {e}")
+            self.recording = False
+            
+    def _on_key_press(self, key):
+        """Handle key press events"""
+        try:
+            # Stop on space key
+            if key == keyboard.Key.space:
+                print("\nStopping recording...")
+                self.recording = False
+                return False  # Stop listener
+        except Exception as e:
+            print(f"\nError processing key press: {e}")
+        return True  # Continue listening
 
 
 def test_sounds():

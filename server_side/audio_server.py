@@ -57,7 +57,7 @@ class StreamingTranscriber:
         self.buffer = queue.Queue()
         self.is_processing = False
         self.current_audio = []
-        self.min_audio_length = CONFIG.get("STREAMING_MIN_AUDIO_LENGTH", 20.0)  # Use config value or default to 5.0
+        self.min_audio_length = CONFIG.get("STREAMING_MIN_AUDIO_LENGTH", 20.0)  # Use config value or default to 20.0
         self.process_frequency = CONFIG.get("STREAMING_PROCESS_FREQUENCY", 3.0)  # Use config value or default to 3.0
         self.rate = CONFIG["RATE"]
         self.channels = CONFIG["CHANNELS"]
@@ -67,6 +67,8 @@ class StreamingTranscriber:
         self.last_process_time = time.time()
         self.accumulated_transcription = ""  # Store the complete transcription
         self.processing_thread = None
+        self.previous_segments = []  # Store previous segments for context
+        self.max_context_segments = 3  # Number of previous segments to keep for context
         logger.info(f"New streaming session initialized: {self.session_id}")
         logger.info(f"Using min_audio_length={self.min_audio_length}s, process_frequency={self.process_frequency}s")
 
@@ -138,15 +140,32 @@ class StreamingTranscriber:
             # Transcribe audio
             logger.info(f"Session {self.session_id}: Starting transcription of {audio_length:.2f}s audio")
             
+            # Create initial prompt from previous segments if available
+            initial_prompt = None
+            if self.previous_segments:
+                initial_prompt = " ".join(self.previous_segments)
+                logger.debug(f"Session {self.session_id}: Using initial prompt: '{initial_prompt}'")
+            
+            # Transcribe with initial prompt
             segments, info = self.model.transcribe(
                 temp_file, 
                 beam_size=CONFIG["BEAM_SIZE"],
-                without_timestamps=True
+                without_timestamps=True,
+                initial_prompt=initial_prompt
             )
             
             # Get transcription text
-            text = " ".join(segment.text for segment in segments)
+            segment_texts = [segment.text for segment in segments]
+            text = " ".join(segment_texts)
             logger.info(f"Session {self.session_id}: Background transcription result: '{text}'")
+            
+            # Update previous segments for context in future transcriptions
+            if text.strip():
+                # Add this transcription to previous segments
+                self.previous_segments.append(text)
+                # Keep only the most recent segments
+                if len(self.previous_segments) > self.max_context_segments:
+                    self.previous_segments = self.previous_segments[-self.max_context_segments:]
             
             # Add to results queue
             self.buffer.put(text)
@@ -194,11 +213,18 @@ class StreamingTranscriber:
                 wf.setframerate(self.rate)
                 wf.writeframes(np.array(self.current_audio, dtype=np.int16).tobytes())
             
-            # Transcribe final audio chunk
+            # Create initial prompt from previous segments if available
+            initial_prompt = None
+            if self.previous_segments:
+                initial_prompt = " ".join(self.previous_segments)
+                logger.debug(f"Session {self.session_id}: Using initial prompt for final chunk: '{initial_prompt}'")
+            
+            # Transcribe final audio chunk with context
             segments, info = self.model.transcribe(
                 temp_file, 
                 beam_size=CONFIG["BEAM_SIZE"],
-                without_timestamps=True
+                without_timestamps=True,
+                initial_prompt=initial_prompt
             )
             
             # Get transcription text
