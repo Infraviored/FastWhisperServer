@@ -61,6 +61,10 @@ class StreamingTranscriber:
         self.rate = CONFIG["RATE"]
         self.channels = CONFIG["CHANNELS"]
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.ws = None  # Store websocket reference
+        self.total_audio_duration = 0  # Track total audio duration
+        self.segment_count = 0  # Track number of segments processed
+        self.expected_segments = 1  # Initial estimate, will be updated
         logger.info(f"New streaming session initialized: {self.session_id}")
 
     def add_audio(self, audio_data):
@@ -77,6 +81,10 @@ class StreamingTranscriber:
             self.current_audio.extend(audio_data.tolist())
             audio_length = len(self.current_audio) / self.rate
             logger.debug(f"Session {self.session_id}: Current buffer length: {audio_length:.2f}s")
+            
+            # Update total audio duration and estimate expected segments
+            self.total_audio_duration += len(audio_data) / self.rate
+            self.expected_segments = max(1, int(self.total_audio_duration / 30) + 1)
             
             if audio_length >= self.min_audio_length and not self.is_processing:
                 self.is_processing = True
@@ -115,6 +123,19 @@ class StreamingTranscriber:
             text = " ".join(segment.text for segment in segments)
             logger.info(f"Session {self.session_id}: Transcribed text: {text}")
             
+            # Increment segment count
+            self.segment_count += 1
+            
+            # Send segment progress notification
+            if self.ws:
+                self.ws.send(json.dumps({
+                    "segment_progress": {
+                        "current": self.segment_count,
+                        "total": self.expected_segments
+                    }
+                }))
+                logger.debug(f"Session {self.session_id}: Sent segment progress notification {self.segment_count}/{self.expected_segments}")
+            
             self.current_audio = []
             return text
 
@@ -147,6 +168,7 @@ def stream(ws):
 
         logger.info(f"Session {session_id}: Starting streaming transcription")
         transcriber = StreamingTranscriber(model)
+        transcriber.ws = ws  # Pass websocket to transcriber for segment notifications
         
         while True:
             try:

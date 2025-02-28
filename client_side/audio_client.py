@@ -318,6 +318,24 @@ class StreamingRecorder(AudioRecorder):
             if "error" in data:
                 print(f"\nServer error: {data['error']}")
                 self.streaming = False
+            elif "segment_progress" in data:
+                # Play a sound with pitch based on progress
+                progress = data["segment_progress"]
+                current_segment = progress["current"]
+                total_segments = progress["total"]
+                
+                # Only play for segments before the final one
+                if current_segment < total_segments:
+                    # Calculate pitch - start low and increase with each segment
+                    base_freq = 220  # A3 note
+                    freq = base_freq * (1 + 0.5 * (current_segment / total_segments))
+                    
+                    # Create and play a custom pitched sound
+                    samples = generate_beep(freq, 0.15)
+                    sd.play(samples, CONFIG["RATE"])
+                    sd.wait()
+                    
+                    print(f"\nSegment {current_segment}/{total_segments} processed")
             elif "text" in data:
                 self.accumulated_text.append(data["text"])
                 print(f"\rPartial transcription: {data['text']}", end="", flush=True)
