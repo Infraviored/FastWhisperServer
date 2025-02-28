@@ -275,6 +275,8 @@ class StreamingRecorder(AudioRecorder):
         self.session_id = time.strftime("%Y%m%d_%H%M%S")
         self.min_recording_time = 2.0  # Ensure at least 2 seconds of audio
         self.start_time = None
+        self.audio_chunks_sent = 0  # Track how many chunks we've sent
+        self.total_audio_bytes = 0  # Track total audio bytes sent
 
     def _connect_websocket(self):
         """Establish WebSocket connection"""
@@ -315,10 +317,12 @@ class StreamingRecorder(AudioRecorder):
         print("WebSocket connected, authenticating...")
         ws.send(CONFIG["API_KEY"])
         self.connection_established = True
+        print("DEBUG: WebSocket connection established and authenticated")
 
     def _on_ws_message(self, ws, message):
         """Handle incoming transcription"""
         try:
+            print(f"\nDEBUG: Received message from server: {message}")
             data = json.loads(message)
             if "error" in data:
                 print(f"\nServer error: {data['error']}")
@@ -330,6 +334,7 @@ class StreamingRecorder(AudioRecorder):
             print(f"\nError: Invalid JSON message from server: {message}")
         except Exception as e:
             print(f"\nError processing message: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
 
     def _on_ws_error(self, ws, error):
         play_sound("error")
@@ -408,6 +413,10 @@ class StreamingRecorder(AudioRecorder):
                 print(f"\nEnsuring minimum recording time ({self.min_recording_time}s)...")
                 time.sleep(self.min_recording_time - elapsed)
 
+            # Print debug info about audio sent
+            print(f"\nDEBUG: Sent {self.audio_chunks_sent} audio chunks ({self.total_audio_bytes} bytes)")
+            print(f"DEBUG: Recording duration: {time.time() - self.start_time:.2f} seconds")
+            
             # Clean up stream
             if hasattr(self, 'stream') and self.stream:
                 try:
@@ -425,7 +434,7 @@ class StreamingRecorder(AudioRecorder):
                     
                     # Wait for final transcription
                     print("Waiting for final transcription...")
-                    time.sleep(3.0)  # Give server more time to process final audio
+                    time.sleep(5.0)  # Give server more time to process final audio
                     
                     self.ws.close()
                 except Exception as e:
@@ -480,6 +489,15 @@ class StreamingRecorder(AudioRecorder):
             try:
                 self.ws.send(in_data, ABNF.OPCODE_BINARY)
                 self.frames.append(in_data)  # Also store locally for backup
+                
+                # Update debug counters
+                self.audio_chunks_sent += 1
+                self.total_audio_bytes += len(in_data)
+                
+                # Print debug info every 10 chunks
+                if self.audio_chunks_sent % 10 == 0:
+                    print(f"\nDEBUG: Sent {self.audio_chunks_sent} audio chunks ({self.total_audio_bytes} bytes)")
+                
             except Exception as e:
                 print(f"\nError sending audio data: {str(e)}")
                 self.streaming = False

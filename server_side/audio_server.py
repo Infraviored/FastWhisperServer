@@ -61,13 +61,19 @@ class StreamingTranscriber:
         self.rate = CONFIG["RATE"]
         self.channels = CONFIG["CHANNELS"]
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.total_audio_received = 0
+        self.chunks_received = 0
         logger.info(f"New streaming session initialized: {self.session_id}")
 
     def add_audio(self, audio_data):
         """Add audio data to buffer"""
         try:
+            # Update counters
+            self.chunks_received += 1
+            self.total_audio_received += len(audio_data)
+            
             # Log incoming data size
-            logger.debug(f"Session {self.session_id}: Received audio chunk of size {len(audio_data)} bytes")
+            logger.debug(f"Session {self.session_id}: Received audio chunk #{self.chunks_received} of size {len(audio_data)} bytes (total: {self.total_audio_received} bytes)")
             
             # Convert bytes to numpy array if needed
             if isinstance(audio_data, bytes):
@@ -76,7 +82,7 @@ class StreamingTranscriber:
             
             self.current_audio.extend(audio_data.tolist())
             audio_length = len(self.current_audio) / self.rate
-            logger.debug(f"Session {self.session_id}: Current buffer length: {audio_length:.2f}s")
+            logger.debug(f"Session {self.session_id}: Current buffer length: {audio_length:.2f}s ({len(self.current_audio)} samples)")
             
             if audio_length >= self.min_audio_length and not self.is_processing:
                 self.is_processing = True
@@ -113,7 +119,7 @@ class StreamingTranscriber:
 
             # Get text and clear buffer
             text = " ".join(segment.text for segment in segments)
-            logger.info(f"Session {self.session_id}: Transcribed text: {text}")
+            logger.info(f"Session {self.session_id}: Transcribed text: '{text}'")
             
             self.current_audio = []
             return text
@@ -158,18 +164,25 @@ def stream(ws):
                     
                     # Process any remaining audio before ending
                     if transcriber.current_audio and len(transcriber.current_audio) > 0:
-                        logger.info(f"Session {session_id}: Processing final audio chunk of {len(transcriber.current_audio)/transcriber.rate:.2f}s")
+                        audio_length = len(transcriber.current_audio) / transcriber.rate
+                        logger.info(f"Session {session_id}: Processing final audio chunk of {audio_length:.2f}s ({len(transcriber.current_audio)} samples)")
                         result = transcriber._process_audio()
                         if result:
-                            logger.debug(f"Session {session_id}: Sending final transcription: {result}")
+                            logger.info(f"Session {session_id}: Sending final transcription: '{result}'")
                             ws.send(json.dumps({"text": result}))
-                    
+                        else:
+                            logger.warning(f"Session {session_id}: Final transcription returned no result")
+                    else:
+                        logger.warning(f"Session {session_id}: No audio data to process at end of stream")
+                        
+                    # Log summary
+                    logger.info(f"Session {session_id}: Streaming session summary - Received {transcriber.chunks_received} chunks, {transcriber.total_audio_received} bytes total")
                     break
                     
                 # Process audio
                 result = transcriber.add_audio(data)
                 if result:
-                    logger.debug(f"Session {session_id}: Sending transcription: {result}")
+                    logger.info(f"Session {session_id}: Sending transcription: '{result}'")
                     ws.send(json.dumps({"text": result}))
                     
             except Exception as e:
