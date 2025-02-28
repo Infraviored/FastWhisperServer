@@ -304,6 +304,117 @@ def transcribe():
             logging.getLogger("faster_whisper").debug = original_debug
 
 
+@app.route("/transcribe_with_progress", methods=["POST"])
+def transcribe_with_progress():
+    start_time = time.time()
+    print(f"\nStarting transcription at {time.strftime('%H:%M:%S')}")
+
+    # Check API key
+    if request.headers.get("X-API-Key") != CONFIG["API_KEY"]:
+        return "Unauthorized", 401
+
+    # Check file presence and size
+    if "file" not in request.files:
+        return "No file", 400
+    if request.content_length > CONFIG["MAX_FILE_SIZE"]:
+        return "File too large", 413
+
+    file = request.files["file"]
+    temp_path = CONFIG["TEMP_FILE"]
+    file.save(temp_path)
+
+    def generate():
+        try:
+            # Basic WAV validation
+            with wave.open(temp_path, "rb") as wav:
+                if wav.getnchannels() > 2:
+                    yield json.dumps({"error": "Invalid audio format"})
+                    return
+                
+                # Calculate expected segments based on audio duration
+                frames = wav.getnframes()
+                rate = wav.getframerate()
+                duration = frames / rate
+                expected_segments = max(1, int(duration / 30) + 1)
+                
+                print(f"Audio duration: {duration:.2f}s, expecting {expected_segments} segments")
+
+            # Create a subclass to monitor segment processing
+            class SegmentMonitor:
+                def __init__(self):
+                    self.segment_count = 0
+                    self.last_start_time = 0
+                    
+                def check_segment(self, segment_start):
+                    # If this is a new 30-second segment
+                    if segment_start >= self.last_start_time + 30:
+                        self.segment_count += 1
+                        self.last_start_time = segment_start
+                        print(f"Processed segment {self.segment_count}/{expected_segments-1}")
+                        
+                        # Send progress update
+                        yield json.dumps({
+                            "segment_progress": {
+                                "current": self.segment_count,
+                                "total": expected_segments
+                            }
+                        }) + "\n"
+                        return True
+                    return False
+            
+            monitor = SegmentMonitor()
+            
+            # Enable logging to capture segment processing
+            logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
+            
+            # Original handler to capture log messages
+            original_debug = logging.getLogger("faster_whisper").debug
+            
+            # Override debug method to detect segment processing
+            def custom_debug(msg, *args, **kwargs):
+                original_debug(msg, *args, **kwargs)
+                
+                # Check if this is a segment processing message
+                if "Processing segment at" in msg:
+                    # Extract the timestamp
+                    try:
+                        timestamp = float(msg.split("Processing segment at ")[1].split(":")[0]) * 60 + \
+                                  float(msg.split("Processing segment at ")[1].split(":")[1])
+                        
+                        # If this is a new segment, yield progress update
+                        monitor.check_segment(timestamp)
+                    except:
+                        pass
+            
+            # Replace the debug method
+            logging.getLogger("faster_whisper").debug = custom_debug
+
+            segments, info = model.transcribe(
+                temp_path, beam_size=CONFIG["BEAM_SIZE"], without_timestamps=True, log_progress=True
+            )
+
+            print(f"Detected language: {info.language} (probability: {info.language_probability:.2f})")
+
+            # Force evaluation of generator to catch any issues
+            text = " ".join(segment.text for segment in segments)
+            duration = time.time() - start_time
+            print(f"Completed transcription in {duration:.1f} seconds\n")
+
+            yield json.dumps({"text": text.strip()}) + "\n"
+
+        except Exception as e:
+            print(f"Error during transcription: {str(e)}")
+            yield json.dumps({"error": str(e)}) + "\n"
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            # Restore original debug method
+            if 'original_debug' in locals():
+                logging.getLogger("faster_whisper").debug = original_debug
+
+    return app.response_class(generate(), mimetype='text/event-stream')
+
+
 if __name__ == "__main__":
     print("\nStarting Whisper transcription server...")
     print("Configuration:")

@@ -222,67 +222,36 @@ class AudioRecorder:
             wf.close()
 
             print("Sending to server for transcription...")
-            url = f"{CONFIG['SERVER_URL']}/transcribe_with_progress"
+            url = f"{CONFIG['SERVER_URL']}/transcribe"
             headers = {"X-API-Key": CONFIG["API_KEY"]}
 
+            # Start a thread to monitor server progress - ACTUALLY CALL THE METHOD HERE
+            self._start_segment_monitor()
+
             with open(CONFIG["TEMP_FILE"], "rb") as audio_file:
-                # Use a streaming response to get progress updates
-                with requests.post(
-                    url, files={"file": audio_file}, headers=headers, stream=True
-                ) as response:
-                    
-                    if response.status_code != 200:
-                        print(f"Server error: {response.text}")
-                        return None
-                    
-                    # Process streaming response for progress updates
-                    final_text = ""
-                    segment_count = 0
-                    expected_segments = 1
-                    
-                    for line in response.iter_lines():
-                        if not line:
-                            continue
-                        
-                        data = json.loads(line.decode('utf-8'))
-                        
-                        if "segment_progress" in data:
-                            # Play a sound with pitch based on progress
-                            progress = data["segment_progress"]
-                            current_segment = progress["current"]
-                            total_segments = progress["total"]
-                            expected_segments = total_segments
-                            
-                            # Only play for segments before the final one
-                            if current_segment < total_segments:
-                                # Calculate pitch - start low and increase with each segment
-                                base_freq = 220  # A3 note
-                                freq = base_freq * (1 + 0.5 * (current_segment / total_segments))
-                                
-                                # Create and play a custom pitched sound
-                                samples = generate_beep(freq, 0.15)
-                                sd.play(samples, CONFIG["RATE"])
-                                sd.wait()
-                                
-                                print(f"\nSegment {current_segment}/{total_segments} processed")
-                        
-                        elif "text" in data:
-                            final_text = data["text"]
-                    
-                    if not final_text.strip():
-                        play_sound("empty")
-                        print("\nTranscription was empty!")
-                        return None
-                    
-                    subprocess.run(
-                        ["xclip", "-selection", "clipboard"],
-                        input=final_text.encode(),
-                        check=True,
-                    )
-                    play_sound("complete")
-                    print("\nTranscription copied to clipboard!")
-                    print(f"Text: {final_text}")
-                    return final_text
+                response = requests.post(
+                    url, files={"file": audio_file}, headers=headers
+                )
+
+            if response.status_code != 200:
+                print(f"Server error: {response.text}")
+                return None
+            
+            final_text = response.json().get("text", "")
+            if not final_text.strip():
+                play_sound("empty")
+                print("\nTranscription was empty!")
+                return None
+            
+            subprocess.run(
+                ["xclip", "-selection", "clipboard"],
+                input=final_text.encode(),
+                check=True,
+            )
+            play_sound("complete")
+            print("\nTranscription copied to clipboard!")
+            print(f"Text: {final_text}")
+            return final_text
 
         except Exception as e:
             print(f"Error during save/transcribe: {e}")
