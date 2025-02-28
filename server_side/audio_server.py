@@ -57,7 +57,7 @@ class StreamingTranscriber:
         self.buffer = queue.Queue()
         self.is_processing = False
         self.current_audio = []
-        self.min_audio_length = CONFIG.get("STREAMING_MIN_AUDIO_LENGTH", 5.0)  # Use config value or default to 5.0
+        self.min_audio_length = CONFIG.get("STREAMING_MIN_AUDIO_LENGTH", 20.0)  # Use config value or default to 5.0
         self.process_frequency = CONFIG.get("STREAMING_PROCESS_FREQUENCY", 3.0)  # Use config value or default to 3.0
         self.rate = CONFIG["RATE"]
         self.channels = CONFIG["CHANNELS"]

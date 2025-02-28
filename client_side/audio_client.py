@@ -318,7 +318,9 @@ class StreamingRecorder(AudioRecorder):
     def _on_ws_open(self, ws):
         """Send API key on connection"""
         print("WebSocket connected, authenticating...")
-        ws.send(CONFIG["API_KEY"])
+        # Send API key as JSON
+        auth_message = json.dumps({"api_key": CONFIG["API_KEY"]})
+        ws.send(auth_message)
         self.connection_established = True
         print("DEBUG: WebSocket connection established and authenticated")
 
