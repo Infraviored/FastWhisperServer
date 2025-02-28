@@ -57,15 +57,15 @@ class StreamingTranscriber:
         self.buffer = queue.Queue()
         self.is_processing = False
         self.current_audio = []
-        self.min_audio_length = CONFIG.get("STREAMING_MIN_AUDIO_LENGTH", 5.0)  # Use config value or default to 5.0
-        self.process_frequency = CONFIG.get("STREAMING_PROCESS_FREQUENCY", 3.0)  # Use config value or default to 3.0
+        self.min_audio_length = CONFIG.get("STREAMING_MIN_AUDIO_LENGTH", 10.0)  # Use config value or default to 5.0
+        self.process_frequency = CONFIG.get("STREAMING_PROCESS_FREQUENCY", 10.0)  # Use config value or default to 3.0
         self.rate = CONFIG["RATE"]
         self.channels = CONFIG["CHANNELS"]
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.total_audio_received = 0
         self.chunks_received = 0
         self.last_process_time = time.time()
-        self.accumulated_text = []  # Store all transcribed text
+        self.accumulated_transcription = ""  # Store the complete transcription
         self.processing_thread = None
         logger.info(f"New streaming session initialized: {self.session_id}")
         logger.info(f"Using min_audio_length={self.min_audio_length}s, process_frequency={self.process_frequency}s")
@@ -92,7 +92,7 @@ class StreamingTranscriber:
             # Process audio if we have enough and not currently processing
             current_time = time.time()
             if (audio_length >= self.min_audio_length and not self.is_processing and 
-                current_time - self.last_process_time >= self.process_frequency):  # Process every 3 seconds
+                current_time - self.last_process_time >= self.process_frequency):
                 
                 # Start processing in a background thread
                 self.is_processing = True
@@ -138,7 +138,6 @@ class StreamingTranscriber:
             # Transcribe audio
             logger.info(f"Session {self.session_id}: Starting transcription of {audio_length:.2f}s audio")
             
-            # Use the model's configuration from CONFIG, not hardcoded values
             segments, info = self.model.transcribe(
                 temp_file, 
                 beam_size=CONFIG["BEAM_SIZE"],
@@ -151,6 +150,10 @@ class StreamingTranscriber:
             
             # Add to results queue
             self.buffer.put(text)
+            
+            # Add to accumulated transcription
+            if text.strip():
+                self.accumulated_transcription += text
             
             # Cleanup
             if os.path.exists(temp_file):
@@ -172,7 +175,7 @@ class StreamingTranscriber:
             return None
 
     def process_final_audio(self):
-        """Process any remaining audio and return final result"""
+        """Process any remaining audio and return final accumulated result"""
         # Wait for any ongoing processing to complete
         logger.info(f"Session {self.session_id}: Waiting for background processing to complete")
         if self.processing_thread and self.processing_thread.is_alive():
@@ -199,36 +202,42 @@ class StreamingTranscriber:
             )
             
             # Get transcription text
-            final_text = " ".join(segment.text for segment in segments)
-            logger.info(f"Session {self.session_id}: Final chunk transcription: '{final_text}'")
+            final_chunk_text = " ".join(segment.text for segment in segments)
+            logger.info(f"Session {self.session_id}: Final chunk transcription: '{final_chunk_text}'")
+            
+            # Add final chunk to accumulated transcription
+            if final_chunk_text.strip():
+                self.accumulated_transcription += final_chunk_text
             
             # Cleanup
             if os.path.exists(temp_file):
                 os.remove(temp_file)
                 logger.debug(f"Session {self.session_id}: Cleaned up final temporary file")
-            
-            return final_text
         
-        return None
+        # Return the complete accumulated transcription
+        return self.accumulated_transcription
 
 
 @sock.route('/stream')
-def stream(ws):
-    """Handle streaming transcription requests"""
+def stream_handler(ws):
+    """WebSocket handler for streaming audio"""
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    logger.info(f"New WebSocket connection established: {session_id}")
+    logger.info(f"New streaming connection from {request.remote_addr}, session {session_id}")
     
     try:
-        # Verify API key
-        api_key = ws.receive()
-        logger.debug(f"Session {session_id}: Received API key")
+        # Authenticate
+        auth_message = ws.receive()
+        auth_data = json.loads(auth_message)
         
-        if api_key != CONFIG["API_KEY"]:
-            logger.warning(f"Session {session_id}: Unauthorized access attempt")
-            ws.send(json.dumps({"error": "Unauthorized"}))
+        if auth_data.get("api_key") != CONFIG["API_KEY"]:
+            logger.warning(f"Session {session_id}: Authentication failed")
+            ws.send(json.dumps({"error": "Authentication failed"}))
             return
-
-        logger.info(f"Session {session_id}: Starting streaming transcription")
+        
+        logger.info(f"Session {session_id}: Authentication successful")
+        ws.send(json.dumps({"status": "authenticated"}))
+        
+        # Initialize transcriber
         transcriber = StreamingTranscriber(model)
         
         # Start a background thread to check for results and send them to client
@@ -239,33 +248,35 @@ def stream(ws):
         results_thread.daemon = True
         results_thread.start()
         
+        # Process incoming audio data
         while True:
             try:
-                data = ws.receive()
+                message = ws.receive()
                 
-                # Check for end signal
-                if data == "END_STREAM":
+                # Check if client wants to end the stream
+                if message == "END_STREAM":
                     logger.info(f"Session {session_id}: Received end stream signal")
-                    
-                    # Process all accumulated audio for final transcription
-                    result = transcriber.process_final_audio()
-                    if result:
-                        logger.info(f"Session {session_id}: Sending final transcription: '{result}'")
-                        ws.send(json.dumps({"text": result, "final": True}))
-                    else:
-                        logger.warning(f"Session {session_id}: Final transcription returned no result")
-                        
-                    # Log summary
-                    logger.info(f"Session {session_id}: Streaming session summary - Received {transcriber.chunks_received} chunks, {transcriber.total_audio_received} bytes total")
                     break
+                
+                # Process binary audio data
+                if message:
+                    data = message
                     
-                # Add audio to transcriber
-                transcriber.add_audio(data)
+                    # Add audio to transcriber
+                    transcriber.add_audio(data)
                     
             except Exception as e:
                 logger.error(f"Session {session_id}: Error processing audio chunk: {str(e)}")
                 logger.error(f"Traceback: {traceback.format_exc()}")
                 break
+                
+        # Process final audio and send complete transcription
+        final_transcription = transcriber.process_final_audio()
+        if final_transcription:
+            logger.info(f"Session {session_id}: Sending final transcription: '{final_transcription}'")
+            ws.send(json.dumps({"text": final_transcription, "final": True}))
+        
+        logger.info(f"Session {session_id}: Streaming session summary - Received {transcriber.chunks_received} chunks, {transcriber.total_audio_received} bytes total")
                 
     except Exception as e:
         logger.error(f"Session {session_id}: Streaming error: {str(e)}")
