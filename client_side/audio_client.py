@@ -422,7 +422,11 @@ class StreamingRecorder(AudioRecorder):
                     # Send end signal to server
                     print("\nSending end signal to server...")
                     self.ws.send("END_STREAM")
-                    time.sleep(1.0)  # Give server more time to process final audio
+                    
+                    # Wait for final transcription
+                    print("Waiting for final transcription...")
+                    time.sleep(3.0)  # Give server more time to process final audio
+                    
                     self.ws.close()
                 except Exception as e:
                     print(f"\nError closing WebSocket: {e}")

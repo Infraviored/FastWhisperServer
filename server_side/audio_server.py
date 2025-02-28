@@ -155,6 +155,15 @@ def stream(ws):
                 # Check for end signal
                 if data == "END_STREAM":
                     logger.info(f"Session {session_id}: Received end stream signal")
+                    
+                    # Process any remaining audio before ending
+                    if transcriber.current_audio and len(transcriber.current_audio) > 0:
+                        logger.info(f"Session {session_id}: Processing final audio chunk of {len(transcriber.current_audio)/transcriber.rate:.2f}s")
+                        result = transcriber._process_audio()
+                        if result:
+                            logger.debug(f"Session {session_id}: Sending final transcription: {result}")
+                            ws.send(json.dumps({"text": result}))
+                    
                     break
                     
                 # Process audio
