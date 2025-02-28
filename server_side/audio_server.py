@@ -57,16 +57,18 @@ class StreamingTranscriber:
         self.buffer = queue.Queue()
         self.is_processing = False
         self.current_audio = []
-        self.min_audio_length = 1.0  # Reduced to 1.0 second for faster processing
+        self.min_audio_length = CONFIG.get("STREAMING_MIN_AUDIO_LENGTH", 5.0)  # Use config value or default to 5.0
+        self.process_frequency = CONFIG.get("STREAMING_PROCESS_FREQUENCY", 3.0)  # Use config value or default to 3.0
         self.rate = CONFIG["RATE"]
         self.channels = CONFIG["CHANNELS"]
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.total_audio_received = 0  # Track total audio received
-        self.chunks_received = 0  # Track number of chunks received
+        self.total_audio_received = 0
+        self.chunks_received = 0
         self.last_process_time = time.time()
-        self.accumulated_audio = []  # Store all audio for final processing
+        self.accumulated_text = []  # Store all transcribed text
         self.processing_thread = None
         logger.info(f"New streaming session initialized: {self.session_id}")
+        logger.info(f"Using min_audio_length={self.min_audio_length}s, process_frequency={self.process_frequency}s")
 
     def add_audio(self, audio_data):
         """Add audio data to buffer and process in background if needed"""
@@ -84,14 +86,13 @@ class StreamingTranscriber:
                 audio_data = np.frombuffer(audio_data, dtype=np.int16)
             
             self.current_audio.extend(audio_data.tolist())
-            self.accumulated_audio.extend(audio_data.tolist())  # Store for final processing
             
             audio_length = len(self.current_audio) / self.rate
             
             # Process audio if we have enough and not currently processing
             current_time = time.time()
             if (audio_length >= self.min_audio_length and not self.is_processing and 
-                current_time - self.last_process_time >= 2.0):  # Process every 2 seconds
+                current_time - self.last_process_time >= self.process_frequency):  # Process every 3 seconds
                 
                 # Start processing in a background thread
                 self.is_processing = True
@@ -120,105 +121,95 @@ class StreamingTranscriber:
             return None
 
     def _process_audio_background(self, audio_data):
-        """Process audio in background thread and send result to client"""
+        """Process audio in background thread and put result in queue"""
         try:
             temp_file = f"{CONFIG['TEMP_FILE']}.{self.session_id}.{time.time()}"
             
             # Convert audio data to temporary file
-            with wave.open(temp_file, 'wb') as wf:
-                wf.setnchannels(self.channels)
-                wf.setsampwidth(2)  # 16-bit audio
-                wf.setframerate(self.rate)
-                audio_bytes = np.array(audio_data, dtype=np.int16).tobytes()
-                wf.writeframes(audio_bytes)
-            
             audio_length = len(audio_data) / self.rate
             logger.info(f"Session {self.session_id}: Processing {audio_length:.2f}s audio in background")
             
+            with wave.open(temp_file, "wb") as wf:
+                wf.setnchannels(self.channels)
+                wf.setsampwidth(2)  # 16-bit audio
+                wf.setframerate(self.rate)
+                wf.writeframes(np.array(audio_data, dtype=np.int16).tobytes())
+            
             # Transcribe audio
+            logger.info(f"Session {self.session_id}: Starting transcription of {audio_length:.2f}s audio")
+            
+            # Use the model's configuration from CONFIG, not hardcoded values
             segments, info = self.model.transcribe(
                 temp_file, 
                 beam_size=CONFIG["BEAM_SIZE"],
-                without_timestamps=True,
-                language="en"  # Force English for better results
+                without_timestamps=True
             )
             
             # Get transcription text
             text = " ".join(segment.text for segment in segments)
             logger.info(f"Session {self.session_id}: Background transcription result: '{text}'")
             
-            # Clean up temporary file
+            # Add to results queue
+            self.buffer.put(text)
+            
+            # Cleanup
             if os.path.exists(temp_file):
                 os.remove(temp_file)
                 logger.debug(f"Session {self.session_id}: Cleaned up temporary file")
             
-            # Store result in queue for sending to client
-            if text.strip():
-                self.buffer.put(text)
+            self.is_processing = False
             
         except Exception as e:
             logger.error(f"Session {self.session_id}: Error in background processing: {str(e)}")
             logger.error(f"Traceback: {traceback.format_exc()}")
-        finally:
             self.is_processing = False
 
     def get_result(self):
-        """Get any available transcription result"""
-        if not self.buffer.empty():
-            return self.buffer.get()
-        return None
+        """Get transcription result from queue if available"""
+        try:
+            return self.buffer.get_nowait()
+        except queue.Empty:
+            return None
 
     def process_final_audio(self):
-        """Process all accumulated audio for final transcription"""
-        try:
-            # Wait for any background processing to complete
-            if self.processing_thread and self.processing_thread.is_alive():
-                logger.info(f"Session {self.session_id}: Waiting for background processing to complete")
-                self.processing_thread.join(timeout=5.0)
+        """Process any remaining audio and return final result"""
+        # Wait for any ongoing processing to complete
+        logger.info(f"Session {self.session_id}: Waiting for background processing to complete")
+        if self.processing_thread and self.processing_thread.is_alive():
+            self.processing_thread.join(timeout=10)
+        
+        # Process any remaining audio in the buffer
+        if self.current_audio and len(self.current_audio) > 0:
+            audio_length = len(self.current_audio) / self.rate
+            logger.info(f"Session {self.session_id}: Processing final chunk of {audio_length:.2f}s audio")
             
-            # Process any remaining audio in current_audio
-            if self.current_audio and len(self.current_audio) > 0:
-                self.accumulated_audio.extend(self.current_audio)
-            
-            if not self.accumulated_audio:
-                logger.warning(f"Session {self.session_id}: No accumulated audio to process")
-                return None
-                
             temp_file = f"{CONFIG['TEMP_FILE']}.{self.session_id}.final"
             
-            # Convert all accumulated audio to temporary file
-            with wave.open(temp_file, 'wb') as wf:
+            with wave.open(temp_file, "wb") as wf:
                 wf.setnchannels(self.channels)
                 wf.setsampwidth(2)  # 16-bit audio
                 wf.setframerate(self.rate)
-                audio_bytes = np.array(self.accumulated_audio, dtype=np.int16).tobytes()
-                wf.writeframes(audio_bytes)
+                wf.writeframes(np.array(self.current_audio, dtype=np.int16).tobytes())
             
-            audio_length = len(self.accumulated_audio) / self.rate
-            logger.info(f"Session {self.session_id}: Processing final audio of {audio_length:.2f}s")
-            
-            # Transcribe audio
+            # Transcribe final audio chunk
             segments, info = self.model.transcribe(
                 temp_file, 
                 beam_size=CONFIG["BEAM_SIZE"],
-                without_timestamps=True,
-                language="en"  # Force English for better results
+                without_timestamps=True
             )
             
             # Get transcription text
-            text = " ".join(segment.text for segment in segments)
-            logger.info(f"Session {self.session_id}: Final transcription: '{text}'")
+            final_text = " ".join(segment.text for segment in segments)
+            logger.info(f"Session {self.session_id}: Final chunk transcription: '{final_text}'")
             
-            # Clean up temporary file
+            # Cleanup
             if os.path.exists(temp_file):
                 os.remove(temp_file)
                 logger.debug(f"Session {self.session_id}: Cleaned up final temporary file")
             
-            return text
-        except Exception as e:
-            logger.error(f"Session {self.session_id}: Error processing final audio: {str(e)}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return None
+            return final_text
+        
+        return None
 
 
 @sock.route('/stream')
