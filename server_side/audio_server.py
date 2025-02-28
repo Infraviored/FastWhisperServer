@@ -57,13 +57,14 @@ class StreamingTranscriber:
         self.buffer = queue.Queue()
         self.is_processing = False
         self.current_audio = []
-        self.min_audio_length = 0.5
+        self.min_audio_length = 2.0  # Increased to 2.0 seconds for better transcription
         self.rate = CONFIG["RATE"]
         self.channels = CONFIG["CHANNELS"]
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.total_audio_received = 0
-        self.chunks_received = 0
+        self.total_audio_received = 0  # Track total audio received
+        self.chunks_received = 0  # Track number of chunks received
         self.last_process_time = time.time()
+        self.accumulated_audio = []  # Store all audio for final processing
         logger.info(f"New streaming session initialized: {self.session_id}")
 
     def add_audio(self, audio_data):
@@ -73,22 +74,23 @@ class StreamingTranscriber:
             self.chunks_received += 1
             self.total_audio_received += len(audio_data)
             
-            # Log incoming data size
-            logger.debug(f"Session {self.session_id}: Received audio chunk #{self.chunks_received} of size {len(audio_data)} bytes (total: {self.total_audio_received} bytes)")
+            # Log incoming data size (only every 50 chunks to reduce log spam)
+            if self.chunks_received % 50 == 0:
+                logger.debug(f"Session {self.session_id}: Received {self.chunks_received} chunks, total {self.total_audio_received} bytes")
             
             # Convert bytes to numpy array if needed
             if isinstance(audio_data, bytes):
                 audio_data = np.frombuffer(audio_data, dtype=np.int16)
-                logger.debug(f"Session {self.session_id}: Converted {len(audio_data)} samples to numpy array")
             
             self.current_audio.extend(audio_data.tolist())
+            self.accumulated_audio.extend(audio_data.tolist())  # Store for final processing
+            
             audio_length = len(self.current_audio) / self.rate
-            logger.debug(f"Session {self.session_id}: Current buffer length: {audio_length:.2f}s ({len(self.current_audio)} samples)")
             
             # Process audio if we have enough and not currently processing
             current_time = time.time()
             if (audio_length >= self.min_audio_length and not self.is_processing and 
-                current_time - self.last_process_time >= 2.0):  # Process at most every 2 seconds
+                current_time - self.last_process_time >= 5.0):  # Process at most every 5 seconds
                 self.is_processing = True
                 self.last_process_time = current_time
                 logger.info(f"Session {self.session_id}: Processing audio chunk of {audio_length:.2f}s")
@@ -103,7 +105,6 @@ class StreamingTranscriber:
         """Process accumulated audio"""
         try:
             temp_file = f"{CONFIG['TEMP_FILE']}.{self.session_id}"
-            logger.debug(f"Session {self.session_id}: Writing {len(self.current_audio)} samples to {temp_file}")
             
             # Convert audio data to temporary file
             with wave.open(temp_file, 'wb') as wf:
@@ -112,32 +113,77 @@ class StreamingTranscriber:
                 wf.setframerate(self.rate)
                 audio_bytes = np.array(self.current_audio, dtype=np.int16).tobytes()
                 wf.writeframes(audio_bytes)
-
-            logger.info(f"Session {self.session_id}: Starting transcription of {len(audio_bytes)/2/self.rate:.2f}s audio")
             
-            # Transcribe
+            logger.info(f"Session {self.session_id}: Starting transcription of {len(self.current_audio)/self.rate:.2f}s audio")
+            
+            # Transcribe audio
             segments, info = self.model.transcribe(
-                temp_file,
+                temp_file, 
                 beam_size=CONFIG["BEAM_SIZE"],
                 without_timestamps=True
             )
-
-            # Get text and clear buffer
+            
+            # Get transcription text
             text = " ".join(segment.text for segment in segments)
             logger.info(f"Session {self.session_id}: Transcribed text: '{text}'")
             
+            # Clear current audio buffer but keep accumulated audio
             self.current_audio = []
-            return text
-
-        except Exception as e:
-            logger.error(f"Session {self.session_id}: Error in streaming transcription: {str(e)}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return None
-        finally:
-            self.is_processing = False
+            
+            # Clean up temporary file
             if os.path.exists(temp_file):
                 os.remove(temp_file)
                 logger.debug(f"Session {self.session_id}: Cleaned up temporary file")
+            
+            self.is_processing = False
+            return text
+        except Exception as e:
+            logger.error(f"Session {self.session_id}: Error processing audio: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            self.is_processing = False
+            return None
+
+    def process_final_audio(self):
+        """Process all accumulated audio at the end of the session"""
+        if not self.accumulated_audio or len(self.accumulated_audio) < self.rate:
+            logger.warning(f"Session {self.session_id}: Not enough audio data for final processing")
+            return None
+            
+        try:
+            temp_file = f"{CONFIG['TEMP_FILE']}_final.{self.session_id}"
+            
+            # Convert all accumulated audio to temporary file
+            with wave.open(temp_file, 'wb') as wf:
+                wf.setnchannels(self.channels)
+                wf.setsampwidth(2)  # 16-bit audio
+                wf.setframerate(self.rate)
+                audio_bytes = np.array(self.accumulated_audio, dtype=np.int16).tobytes()
+                wf.writeframes(audio_bytes)
+            
+            audio_length = len(self.accumulated_audio) / self.rate
+            logger.info(f"Session {self.session_id}: Processing final audio of {audio_length:.2f}s")
+            
+            # Transcribe all audio
+            segments, info = self.model.transcribe(
+                temp_file, 
+                beam_size=CONFIG["BEAM_SIZE"],
+                without_timestamps=True
+            )
+            
+            # Get transcription text
+            text = " ".join(segment.text for segment in segments)
+            logger.info(f"Session {self.session_id}: Final transcription: '{text}'")
+            
+            # Clean up temporary file
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+                logger.debug(f"Session {self.session_id}: Cleaned up final temporary file")
+            
+            return text
+        except Exception as e:
+            logger.error(f"Session {self.session_id}: Error processing final audio: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return None
 
 
 @sock.route('/stream')
@@ -167,18 +213,13 @@ def stream(ws):
                 if data == "END_STREAM":
                     logger.info(f"Session {session_id}: Received end stream signal")
                     
-                    # Process any remaining audio before ending
-                    if transcriber.current_audio and len(transcriber.current_audio) > 0:
-                        audio_length = len(transcriber.current_audio) / transcriber.rate
-                        logger.info(f"Session {session_id}: Processing final audio chunk of {audio_length:.2f}s ({len(transcriber.current_audio)} samples)")
-                        result = transcriber._process_audio()
-                        if result:
-                            logger.info(f"Session {session_id}: Sending final transcription: '{result}'")
-                            ws.send(json.dumps({"text": result}))
-                        else:
-                            logger.warning(f"Session {session_id}: Final transcription returned no result")
+                    # Process all accumulated audio for final transcription
+                    result = transcriber.process_final_audio()
+                    if result:
+                        logger.info(f"Session {session_id}: Sending final transcription: '{result}'")
+                        ws.send(json.dumps({"text": result, "final": True}))
                     else:
-                        logger.warning(f"Session {session_id}: No audio data to process at end of stream")
+                        logger.warning(f"Session {session_id}: Final transcription returned no result")
                         
                     # Log summary
                     logger.info(f"Session {session_id}: Streaming session summary - Received {transcriber.chunks_received} chunks, {transcriber.total_audio_received} bytes total")

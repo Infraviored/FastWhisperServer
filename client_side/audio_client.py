@@ -279,6 +279,7 @@ class StreamingRecorder(AudioRecorder):
         self.total_audio_bytes = 0  # Track total audio bytes sent
         self.stream = None
         self.stream_active = False
+        self.final_transcription = None
 
     def _connect_websocket(self):
         """Establish WebSocket connection"""
@@ -330,8 +331,13 @@ class StreamingRecorder(AudioRecorder):
                 print(f"\nServer error: {data['error']}")
                 self.streaming = False
             elif "text" in data:
-                self.accumulated_text.append(data["text"])
-                print(f"\rPartial transcription: {data['text']}", end="", flush=True)
+                # Check if this is the final transcription
+                if data.get("final", False):
+                    self.final_transcription = data["text"]
+                    print(f"\nFinal transcription received: {data['text']}")
+                else:
+                    self.accumulated_text.append(data["text"])
+                    print(f"\rPartial transcription: {data['text']}", end="", flush=True)
         except json.JSONDecodeError:
             print(f"\nError: Invalid JSON message from server: {message}")
         except Exception as e:
@@ -418,8 +424,8 @@ class StreamingRecorder(AudioRecorder):
                             self.audio_chunks_sent += 1
                             self.total_audio_bytes += len(audio_data)
                             
-                            # Print debug info every 10 chunks
-                            if self.audio_chunks_sent % 10 == 0:
+                            # Print debug info every 50 chunks
+                            if self.audio_chunks_sent % 50 == 0:
                                 print(f"\nDEBUG: Sent {self.audio_chunks_sent} audio chunks ({self.total_audio_bytes} bytes)")
                     except Exception as e:
                         print(f"\nError reading/sending audio: {e}")
@@ -429,12 +435,6 @@ class StreamingRecorder(AudioRecorder):
                     continue
                 
                 time.sleep(0.01)  # Small sleep to prevent CPU hogging
-
-            # Ensure we've recorded enough audio before stopping
-            elapsed = time.time() - self.start_time
-            if elapsed < self.min_recording_time:
-                print(f"\nEnsuring minimum recording time ({self.min_recording_time}s)...")
-                time.sleep(self.min_recording_time - elapsed)
 
             # Print debug info about audio sent
             print(f"\nDEBUG: Sent {self.audio_chunks_sent} audio chunks ({self.total_audio_bytes} bytes)")
@@ -458,14 +458,17 @@ class StreamingRecorder(AudioRecorder):
                     
                     # Wait for final transcription
                     print("Waiting for final transcription...")
-                    time.sleep(5.0)  # Give server more time to process final audio
+                    wait_start = time.time()
+                    while time.time() - wait_start < 10.0 and self.final_transcription is None:
+                        time.sleep(0.1)  # Wait for final transcription with timeout
                     
                     self.ws.close()
                 except Exception as e:
                     print(f"\nError closing WebSocket: {e}")
 
-            # Combine all transcriptions
-            final_text = " ".join(self.accumulated_text)
+            # Use final transcription if available, otherwise use accumulated text
+            final_text = self.final_transcription if self.final_transcription else " ".join(self.accumulated_text)
+            
             if final_text.strip():
                 try:
                     subprocess.run(
