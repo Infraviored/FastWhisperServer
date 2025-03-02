@@ -4,6 +4,9 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../config/config.sh"
 
+# Stop display manager before starting server
+sudo systemctl stop display-manager
+
 cd $REMOTE_DIR
 
 # Check if server is already running and handle screen session

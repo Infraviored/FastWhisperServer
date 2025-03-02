@@ -27,3 +27,6 @@ if pgrep -f "python3.*audio_server.py" > /dev/null; then
 fi
 
 echo "Whisper server stopped."
+
+# Restart display manager after stopping server
+sudo systemctl start display-manager
